@@ -73,7 +73,7 @@ static int finish_request(struct client *client,
 static int is_reply_valid(struct client *client,
     struct homa_etran_event *event);
 static void print_interval(struct client *client, __u64 now);
-static void print_summary(struct client *client);
+static void print_summary(struct client *client, struct client *clients);
 static void print_latency(struct hist_state *hist, const char *unit);
 
 static int client_worker(void *arg)
@@ -420,7 +420,7 @@ static void print_interval(struct client *client, __u64 now)
   client->next_report_ns = now + NS_PER_SECOND;
 }
 
-static void print_summary(struct client *client)
+static void print_summary(struct client *client, struct client *clients)
 {
   __u64 stop_ns = now_ns();
   unsigned int i;
@@ -448,6 +448,9 @@ static void print_summary(struct client *client)
       (unsigned long long) throughput, payload_mbits);
   for (i = 0; i < client->config.ncores; i++)
   {
+    printf("Worker %u summary: throughput=%.6f rps errors=%llu unfinished=%u\n",
+        i, clients[i].window_received / seconds,
+        (unsigned long long) clients[i].errors, clients[i].active);
     printf("Worker %u RTT percentiles (us): ", i);
     print_latency(&rtt_hist[i], "");
   }
@@ -601,7 +604,7 @@ int main(int argc, char **argv)
       now = total.end_ns;
     if (now > total.last_report_ns)
       print_interval(&total, now);
-    print_summary(&total);
+    print_summary(&total, clients);
   }
   for (i = 0; i < config.ncores; i++)
     hist_cleanup(&rtt_hist[i]);
