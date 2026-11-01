@@ -20,14 +20,16 @@ struct homa_etran_config
   struct sockaddr_in local;
   /* Remote endpoint, used by the client. */
   struct sockaddr_in remote;
-  /* Message payload size, 1..1,000,000 bytes. */
-  unsigned int msize;
+  /* Worker index used to select per-worker settings. */
+  unsigned int worker;
+  /* Message payload size per worker, 1..1,000,000 bytes. */
+  unsigned int msize[HOMA_ETRAN_MAX_CORES];
   /* Timed load interval in seconds. */
   unsigned int duration;
-  /* Maximum outstanding client RPCs. */
-  unsigned int mpending;
-  /* Target request payload rate per endpoint in megabits per second. */
-  double rate;
+  /* Maximum outstanding client RPCs per worker. */
+  unsigned int mpending[HOMA_ETRAN_MAX_CORES];
+  /* Target request payload rate per worker in megabits per second. */
+  double rate[HOMA_ETRAN_MAX_CORES];
   /* Check all echoed payload bytes. */
   int validate;
   /* Number of workers */

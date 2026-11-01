@@ -14,6 +14,13 @@
 #define MAX_RTT_US 1000000
 #define TOKEN_BURST_US 1000
 
+#define CLIENT_MSIZE(client) \
+    ((client)->config.msize[(client)->config.worker])
+#define CLIENT_MPENDING(client) \
+    ((client)->config.mpending[(client)->config.worker])
+#define CLIENT_RATE(client) \
+    ((client)->config.rate[(client)->config.worker])
+
 struct pending_rpc
 {
   __u64 id;
@@ -34,8 +41,12 @@ struct client
   __u64 received;
   __u64 errors;
   __u64 window_received;
+  __u64 sent_bytes;
+  __u64 window_received_bytes;
   __u64 interval_sent;
   __u64 interval_received;
+  __u64 interval_sent_bytes;
+  __u64 interval_received_bytes;
   __u64 start_ns;
   __u64 end_ns;
   __u64 last_report_ns;
@@ -44,8 +55,8 @@ struct client
   double tokens;
 };
 
-/* Main owns reporting; workers share only the histogram and startup gate. */
-static struct hist_state rtt_hist;
+/* Main owns reporting; each worker updates its histogram. */
+static struct hist_state rtt_hist[HOMA_ETRAN_MAX_CORES];
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t state_changed = PTHREAD_COND_INITIALIZER;
 static unsigned int ready_workers, done_workers;
@@ -70,7 +81,7 @@ static int client_worker(void *arg)
   struct client *client = arg;
   int ret;
 
-  client->payload = calloc(client->config.msize ? client->config.msize : 1, 1);
+  client->payload = calloc(CLIENT_MSIZE(client) ? CLIENT_MSIZE(client) : 1, 1);
   if (client->payload == NULL)
   {
     perror("Homa client payload");
@@ -161,7 +172,7 @@ static int run_client(struct client *client)
     if (send_requests(client) != 0)
       return -1;
 
-    ret = homa_etran_poll(client->ctx, events, client->config.mpending);
+    ret = homa_etran_poll(client->ctx, events, CLIENT_MPENDING(client));
     if (ret < 0)
     {
       perror("homa_etran_poll");
@@ -192,12 +203,12 @@ static void start_measurement(struct client *client, __u64 now)
 
 static void update_tokens(struct client *client, __u64 now)
 {
-  double bytes_per_us = client->config.rate / 8.0;
+  double bytes_per_us = CLIENT_RATE(client) / 8.0;
   double delta_us = (double) (now - client->last_update_ns) / 1000.0;
   double max_tokens = bytes_per_us * TOKEN_BURST_US;
 
-  if (max_tokens < client->config.msize)
-    max_tokens = client->config.msize;
+  if (max_tokens < CLIENT_MSIZE(client))
+    max_tokens = CLIENT_MSIZE(client);
   client->tokens += delta_us * bytes_per_us;
   if (client->tokens > max_tokens)
     client->tokens = max_tokens;
@@ -209,8 +220,9 @@ static int is_send_allowed(struct client *client, __u64 now)
   if (client->start_ns == 0)
     return client->sent == 0;
 
-  return now < client->end_ns && client->active < client->config.mpending &&
-      client->tokens >= client->config.msize;
+  return now < client->end_ns &&
+      client->active < CLIENT_MPENDING(client) &&
+      client->tokens >= CLIENT_MSIZE(client);
 }
 
 static int send_requests(struct client *client)
@@ -220,7 +232,7 @@ static int send_requests(struct client *client)
   struct pending_rpc *rpc;
   unsigned int i, j;
 
-  for (i = 0; i < client->config.mpending; i++)
+  for (i = 0; i < CLIENT_MPENDING(client); i++)
   {
     if (!is_send_allowed(client, now_ns()))
       break;
@@ -231,14 +243,14 @@ static int send_requests(struct client *client)
 
     if (client->config.validate)
     {
-      for (j = 0; j < client->config.msize; j++)
+      for (j = 0; j < CLIENT_MSIZE(client); j++)
         client->payload[j] = (unsigned char) (client->sequence + j);
     }
 
     rpc->tsc = util_rdtsc();
     if (homa_etran_request(client->ctx, client->fd,
         client->start_ns == 0 ? (void *) &startup : client->payload,
-        client->start_ns == 0 ? sizeof(startup) : client->config.msize,
+        client->start_ns == 0 ? sizeof(startup) : CLIENT_MSIZE(client),
         (const struct sockaddr *) &client->config.remote,
         sizeof(client->config.remote), &rpc->id) != 0)
     {
@@ -254,8 +266,11 @@ static int send_requests(struct client *client)
     client->sent++;
     if (client->start_ns != 0)
     {
-      client->tokens -= client->config.msize;
+      client->tokens -= CLIENT_MSIZE(client);
       __atomic_fetch_add(&client->interval_sent, 1, __ATOMIC_RELAXED);
+      client->sent_bytes += CLIENT_MSIZE(client);
+      __atomic_fetch_add(&client->interval_sent_bytes,
+          CLIENT_MSIZE(client), __ATOMIC_RELAXED);
     }
   }
 
@@ -269,7 +284,7 @@ static int finish_request(struct client *client, struct homa_etran_event *event)
   unsigned int i, j;
   int ret;
 
-  for (i = 0; i < client->config.mpending; i++)
+  for (i = 0; i < CLIENT_MPENDING(client); i++)
   {
     if (client->pending[i].id == event->rpc_id)
     {
@@ -303,7 +318,7 @@ static int finish_request(struct client *client, struct homa_etran_event *event)
   rtt_us = client->start_ns != 0 ? us_since_tsc(rpc->tsc) : 0;
   if (client->config.validate && client->start_ns != 0)
   {
-    for (j = 0; j < client->config.msize; j++)
+    for (j = 0; j < CLIENT_MSIZE(client); j++)
     {
       unsigned char expected = rpc->sequence + j;
 
@@ -332,11 +347,14 @@ static int finish_request(struct client *client, struct homa_etran_event *event)
   client->received++;
   if (client->start_ns != 0)
   {
-    hist_add(&rtt_hist, rtt_us);
+    hist_add(&rtt_hist[client->config.worker], rtt_us);
     if (now < client->end_ns)
     {
       client->window_received++;
       __atomic_fetch_add(&client->interval_received, 1, __ATOMIC_RELAXED);
+      client->window_received_bytes += CLIENT_MSIZE(client);
+      __atomic_fetch_add(&client->interval_received_bytes,
+          CLIENT_MSIZE(client), __ATOMIC_RELAXED);
     }
   }
 
@@ -350,7 +368,7 @@ static int is_reply_valid(struct client *client, struct homa_etran_event *event)
   int same_address =
       event->peer.sin_addr.s_addr == client->config.remote.sin_addr.s_addr;
   int same_port = event->peer.sin_port == client->config.remote.sin_port;
-  int length_valid = event->len == client->config.msize;
+  int length_valid = event->len == CLIENT_MSIZE(client);
   int success = event->status == 0;
 
   if (client->start_ns == 0)
@@ -372,22 +390,32 @@ static int is_reply_valid(struct client *client, struct homa_etran_event *event)
 
 static void print_interval(struct client *client, __u64 now)
 {
+  unsigned int i;
   double seconds = (double) (now - client->last_report_ns) / NS_PER_SECOND;
   double load = client->interval_sent / seconds;
   double throughput = client->interval_received / seconds;
-  double payload_mbits = client->config.msize * 8.0 / 1000000.0;
+  double load_mbits = client->interval_sent_bytes * 8.0 /
+      seconds / 1000000.0;
+  double throughput_mbits = client->interval_received_bytes * 8.0 /
+      seconds / 1000000.0;
 
   printf("[ %3llus ] load=%llu rps | load=%.2f Mb/s | "
       "tp=%llu rps | tp=%.2f Mb/s | ",
       (unsigned long long) ((now - client->start_ns) / NS_PER_SECOND),
-      (unsigned long long) load, load * payload_mbits,
-      (unsigned long long) throughput, throughput * payload_mbits);
+      (unsigned long long) load, load_mbits,
+      (unsigned long long) throughput, throughput_mbits);
 
-  print_latency(&rtt_hist, " us");
+  for (i = 0; i < client->config.ncores; i++)
+  {
+    printf("Worker %u RTT percentiles (us): ", i);
+    print_latency(&rtt_hist[i], "");
+  }
   fflush(stdout);
 
   client->interval_sent = 0;
   client->interval_received = 0;
+  client->interval_sent_bytes = 0;
+  client->interval_received_bytes = 0;
   client->last_report_ns = now;
   client->next_report_ns = now + NS_PER_SECOND;
 }
@@ -395,6 +423,7 @@ static void print_interval(struct client *client, __u64 now)
 static void print_summary(struct client *client)
 {
   __u64 stop_ns = now_ns();
+  unsigned int i;
   double seconds;
   double load, throughput, payload_mbits;
 
@@ -404,7 +433,7 @@ static void print_summary(struct client *client)
   seconds = (double) (stop_ns - client->start_ns) / NS_PER_SECOND;
   load = client->sent / seconds;
   throughput = client->window_received / seconds;
-  payload_mbits = client->config.msize * 8.0 / 1000000.0;
+  payload_mbits = client->sent_bytes * 8.0 / seconds / 1000000.0;
 
   printf("Cores               : %u\n", client->config.ncores);
   printf("TX requests         : %llu\n", (unsigned long long) client->sent);
@@ -412,11 +441,16 @@ static void print_summary(struct client *client)
   printf("RPC errors          : %llu\n", (unsigned long long) client->errors);
   printf("Unfinished RPCs     : %u\n", client->active);
   printf("Avg Load            : %llu rps %.2f Mb/s\n",
-      (unsigned long long) load, load * payload_mbits);
+      (unsigned long long) load, payload_mbits);
+  payload_mbits = client->window_received_bytes * 8.0 /
+      seconds / 1000000.0;
   printf("Avg Throughput      : %llu rps %.2f Mb/s\n",
-      (unsigned long long) throughput, throughput * payload_mbits);
-  printf("RTT percentiles (us): ");
-  print_latency(&rtt_hist, "");
+      (unsigned long long) throughput, payload_mbits);
+  for (i = 0; i < client->config.ncores; i++)
+  {
+    printf("Worker %u RTT percentiles (us): ", i);
+    print_latency(&rtt_hist[i], "");
+  }
   fflush(stdout);
 }
 
@@ -445,6 +479,10 @@ static void collect_interval(struct client *total, struct client *clients)
         0, __ATOMIC_RELAXED);
     total->interval_received += __atomic_exchange_n(&clients[i].interval_received,
         0, __ATOMIC_RELAXED);
+    total->interval_sent_bytes += __atomic_exchange_n(
+        &clients[i].interval_sent_bytes, 0, __ATOMIC_RELAXED);
+    total->interval_received_bytes += __atomic_exchange_n(
+        &clients[i].interval_received_bytes, 0, __ATOMIC_RELAXED);
   }
 }
 
@@ -468,13 +506,24 @@ int main(int argc, char **argv)
      * shared-library destructor accessing partially initialized state. */
     _Exit(EXIT_FAILURE);
   }
-  if (init_hist(&rtt_hist, MAX_RTT_US) != 0)
-    return 1;
+  for (i = 0; i < config.ncores; i++)
+  {
+    if (init_hist(&rtt_hist[i], MAX_RTT_US) != 0)
+    {
+      while (i > 0)
+        hist_cleanup(&rtt_hist[--i]);
+      return 1;
+    }
+  }
   calibrate_tsc();
   total.config = config;
 
-  printf("Homa benchmark: ncores=%u, msize=%u, rate=%.2f Mb/s per endpoint, "
-      "mpending=%u\n", config.ncores, config.msize, config.rate, config.mpending);
+  printf("Homa benchmark: ncores=%u\n", config.ncores);
+  for (i = 0; i < config.ncores; i++)
+  {
+    printf("Worker %u: msize=%u, rate=%.2f Mb/s, mpending=%u\n", i,
+        config.msize[i], config.rate[i], config.mpending[i]);
+  }
   printf("One startup echo per endpoint is excluded from measurements.\n");
   printf("Rates count request/reply payload bytes in one direction.\n");
   printf("RTTs include drained replies; throughput uses the load interval.\n");
@@ -485,6 +534,7 @@ int main(int argc, char **argv)
   for (i = 0; i < config.ncores; i++)
   {
     clients[i].config = config;
+    clients[i].config.worker = i;
     clients[i].config.core = config.cores[i];
     if (config.local.sin_port != 0)
       clients[i].config.local.sin_port = htons(ntohs(config.local.sin_port) + i);
@@ -539,6 +589,8 @@ int main(int argc, char **argv)
     total.received += clients[i].received;
     total.errors += clients[i].errors;
     total.window_received += clients[i].window_received;
+    total.sent_bytes += clients[i].sent_bytes;
+    total.window_received_bytes += clients[i].window_received_bytes;
     total.active += clients[i].active;
   }
   if (!abort_start)
@@ -551,6 +603,7 @@ int main(int argc, char **argv)
       print_interval(&total, now);
     print_summary(&total);
   }
-  hist_cleanup(&rtt_hist);
+  for (i = 0; i < config.ncores; i++)
+    hist_cleanup(&rtt_hist[i]);
   return ret;
 }

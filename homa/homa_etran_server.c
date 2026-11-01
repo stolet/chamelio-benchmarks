@@ -41,7 +41,8 @@ static int server_worker(void *arg)
     }
 
     if (event.type != HOMA_ETRAN_REQUEST || event.sockfd != fd ||
-        event.status != 0 || (!control && event.len != config.msize))
+        event.status != 0 ||
+        (!control && event.len != config.msize[config.worker]))
     {
       fprintf(stderr, "Unexpected Homa request\n");
       break;
@@ -97,6 +98,7 @@ int main(int argc, char **argv)
   for (i = 0; i < config.ncores; i++)
   {
     configs[i] = config;
+    configs[i].worker = i;
     configs[i].core = config.cores[i];
 
     if (config.local.sin_port != 0)
@@ -106,8 +108,9 @@ int main(int argc, char **argv)
     workers[i].run = server_worker;
     workers[i].client = 0;
   }
-  printf("Homa echo server: msize=%u, ncores=%u\n",
-      config.msize, config.ncores);
+  printf("Homa echo server: ncores=%u\n", config.ncores);
+  for (i = 0; i < config.ncores; i++)
+    printf("Worker %u: msize=%u\n", i, config.msize[i]);
   fflush(stdout);
   return homa_run_workers(workers, config.ncores);
 }

@@ -15,6 +15,10 @@
 static int parse_cores(struct homa_etran_config *config, const char *list);
 static int parse_number(const char *text, unsigned int *value);
 static int parse_rate(const char *text, double *value);
+static int parse_unsigned_list(const char *text, unsigned int *values,
+    unsigned int ncores, unsigned int min, unsigned int max);
+static int parse_rate_list(const char *text, double *values,
+    unsigned int ncores);
 static int parse_address(struct sockaddr_in *addr, char *ip, char *port);
 
 int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
@@ -24,12 +28,12 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
   int first = client ? 5 : 3;
   int i;
   const char *cores = NULL;
+  const char *msize = NULL;
+  const char *mpending = NULL;
+  const char *rate = NULL;
 
   memset(config, 0, sizeof(*config));
-  config->msize = 64;
   config->duration = 30;
-  config->mpending = HOMA_ETRAN_DEFAULT_PENDING;
-  config->rate = 10.0;
   config->core = -1;
   config->ncores = 1;
 
@@ -57,19 +61,28 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
       continue;
     }
 
+    if (strcmp(argv[i], "--msize") == 0)
+    {
+      msize = argv[++i];
+      continue;
+    }
+
     if (client && strcmp(argv[i], "--rate") == 0)
     {
-      if (parse_rate(argv[++i], &config->rate) != 0)
-        goto failed;
+      rate = argv[++i];
+      continue;
+    }
+
+    if (client && strcmp(argv[i], "--mpending") == 0)
+    {
+      mpending = argv[++i];
       continue;
     }
 
     if (parse_number(argv[i + 1], &value) != 0)
       goto failed;
 
-    if (strcmp(argv[i], "--msize") == 0 && value <= HOMA_ETRAN_MAX_MESSAGE)
-      config->msize = value;
-    else if (strcmp(argv[i], "--ncores") == 0)
+    if (strcmp(argv[i], "--ncores") == 0)
     {
       if (value == 0 || value > HOMA_ETRAN_MAX_CORES)
         goto failed;
@@ -77,9 +90,6 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
     }
     else if (client && strcmp(argv[i], "--duration") == 0 && value > 0)
       config->duration = value;
-    else if (client && strcmp(argv[i], "--mpending") == 0 &&
-        value > 0 && value <= HOMA_ETRAN_MAX_PENDING)
-      config->mpending = value;
     else
       goto failed;
 
@@ -88,11 +98,19 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
 
   /* RpcSocket caches the supplied port; it cannot use an ephemeral port.
    * eTran cannot transmit empty messages. */
-  if (config->local.sin_port == 0 || config->msize == 0)
+  if (config->local.sin_port == 0)
   {
-    fprintf(stderr, "eTran Homa requires a nonzero bind port and message size\n");
+    fprintf(stderr, "eTran Homa requires a nonzero bind port\n");
     goto failed;
   }
+
+  if (parse_unsigned_list(msize ? msize : "64", config->msize,
+      config->ncores, 1, HOMA_ETRAN_MAX_MESSAGE) != 0 ||
+      parse_unsigned_list(mpending ? mpending : "16", config->mpending,
+      config->ncores, 1, HOMA_ETRAN_MAX_PENDING) != 0 ||
+      parse_rate_list(rate ? rate : "10.0", config->rate,
+      config->ncores) != 0)
+    goto failed;
 
   unsigned int local_port = ntohs(config->local.sin_port);
   unsigned int remote_port = ntohs(config->remote.sin_port);
@@ -112,10 +130,10 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
 
 failed:
   fprintf(stderr, "Usage: %s <bind_ip> <port>%s"
-      " [--msize 1..1000000] [--ncores N] [--cores CPU,...]%s\n", argv[0],
+      " [--msize B[,B...]] [--ncores N] [--cores CPU,...]%s\n", argv[0],
       client ? " <rem_ip> <rem_port>" : "",
-      client ? " [--duration S] [--rate Mb/s]"
-      " [--mpending 1..128] [--validate]" : "");
+      client ? " [--duration S] [--rate Mb/s[,Mb/s...]]"
+      " [--mpending N[,N...]] [--validate]" : "");
   return -1;
 }
 
@@ -160,6 +178,86 @@ static int parse_rate(const char *text, double *value)
     return -1;
 
   *value = parsed;
+  return 0;
+}
+
+static int parse_unsigned_list(const char *text, unsigned int *values,
+    unsigned int ncores, unsigned int min, unsigned int max)
+{
+  unsigned int count = 0, i, value;
+  char *copy = strdup(text);
+  char *next, *token;
+
+  if (copy == NULL)
+    return -1;
+
+  next = copy;
+  while ((token = strsep(&next, ",")) != NULL)
+  {
+    if (count == ncores || parse_number(token, &value) != 0 ||
+        value < min || value > max)
+    {
+      free(copy);
+      return -1;
+    }
+
+    values[count++] = value;
+  }
+  free(copy);
+
+  if (count == 1)
+  {
+    for (i = 1; i < ncores; i++)
+      values[i] = values[0];
+    return 0;
+  }
+
+  if (count != ncores)
+  {
+    fprintf(stderr, "Parameter list must contain one value or one value per worker\n");
+    return -1;
+  }
+
+  return 0;
+}
+
+static int parse_rate_list(const char *text, double *values,
+    unsigned int ncores)
+{
+  unsigned int count = 0, i;
+  double value;
+  char *copy = strdup(text);
+  char *next, *token;
+
+  if (copy == NULL)
+    return -1;
+
+  next = copy;
+  while ((token = strsep(&next, ",")) != NULL)
+  {
+    if (count == ncores || parse_rate(token, &value) != 0)
+    {
+      free(copy);
+      return -1;
+    }
+
+    values[count++] = value;
+  }
+  free(copy);
+
+  if (count == 1)
+  {
+    for (i = 1; i < ncores; i++)
+      values[i] = values[0];
+    return 0;
+  }
+
+  if (count != ncores)
+  {
+    fprintf(stderr, "Parameter list must contain one value or one value per worker\n");
+    return -1;
+  }
+
   return 0;
 }
 
