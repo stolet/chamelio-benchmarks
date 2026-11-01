@@ -388,28 +388,25 @@ static int is_reply_valid(struct client *client, struct homa_etran_event *event)
       length_valid && success;
 }
 
+static void print_rates(__u64 sent, __u64 received, __u64 sent_bytes,
+    __u64 received_bytes, double seconds)
+{
+  printf("load=%llu rps | load=%.2f Mb/s | tp=%llu rps | tp=%.2f Mb/s",
+      (unsigned long long) (sent / seconds),
+      sent_bytes * 8.0 / seconds / 1000000.0,
+      (unsigned long long) (received / seconds),
+      received_bytes * 8.0 / seconds / 1000000.0);
+}
+
 static void print_interval(struct client *client, __u64 now)
 {
-  unsigned int i;
   double seconds = (double) (now - client->last_report_ns) / NS_PER_SECOND;
-  double load = client->interval_sent / seconds;
-  double throughput = client->interval_received / seconds;
-  double load_mbits = client->interval_sent_bytes * 8.0 /
-      seconds / 1000000.0;
-  double throughput_mbits = client->interval_received_bytes * 8.0 /
-      seconds / 1000000.0;
 
-  printf("[ %3llus ] load=%llu rps | load=%.2f Mb/s | "
-      "tp=%llu rps | tp=%.2f Mb/s | ",
-      (unsigned long long) ((now - client->start_ns) / NS_PER_SECOND),
-      (unsigned long long) load, load_mbits,
-      (unsigned long long) throughput, throughput_mbits);
-
-  for (i = 0; i < client->config.ncores; i++)
-  {
-    printf("Worker %u RTT percentiles (us): ", i);
-    print_latency(&rtt_hist[i], "");
-  }
+  printf("Total: [ %3llus ] ",
+      (unsigned long long) ((now - client->start_ns) / NS_PER_SECOND));
+  print_rates(client->interval_sent, client->interval_received,
+      client->interval_sent_bytes, client->interval_received_bytes, seconds);
+  printf("\n");
   fflush(stdout);
 
   client->interval_sent = 0;
@@ -435,6 +432,7 @@ static void print_summary(struct client *client, struct client *clients)
   throughput = client->window_received / seconds;
   payload_mbits = client->sent_bytes * 8.0 / seconds / 1000000.0;
 
+  printf("Total summary:\n");
   printf("Cores               : %u\n", client->config.ncores);
   printf("TX requests         : %llu\n", (unsigned long long) client->sent);
   printf("RX replies          : %llu\n", (unsigned long long) client->received);
@@ -448,10 +446,16 @@ static void print_summary(struct client *client, struct client *clients)
       (unsigned long long) throughput, payload_mbits);
   for (i = 0; i < client->config.ncores; i++)
   {
-    printf("Worker %u summary: throughput=%.6f rps errors=%llu unfinished=%u\n",
+    printf("Core %u summary: throughput=%.6f rps errors=%llu unfinished=%u | "
+        "tp=%.2f Mb/s | load=%.6f rps %.2f Mb/s | tx=%llu rx=%llu\n",
         i, clients[i].window_received / seconds,
-        (unsigned long long) clients[i].errors, clients[i].active);
-    printf("Worker %u RTT percentiles (us): ", i);
+        (unsigned long long) clients[i].errors, clients[i].active,
+        clients[i].window_received_bytes * 8.0 / seconds / 1000000.0,
+        clients[i].sent / seconds,
+        clients[i].sent_bytes * 8.0 / seconds / 1000000.0,
+        (unsigned long long) clients[i].sent,
+        (unsigned long long) clients[i].received);
+    printf("Core %u RTT percentiles (us): ", i);
     print_latency(&rtt_hist[i], "");
   }
   fflush(stdout);
@@ -472,20 +476,32 @@ static void print_latency(struct hist_state *hist, const char *unit)
       (unsigned long long) p999, unit);
 }
 
-static void collect_interval(struct client *total, struct client *clients)
+static void collect_interval(struct client *total, struct client *clients,
+    __u64 now)
 {
   unsigned int i;
+  double seconds = (double) (now - total->last_report_ns) / NS_PER_SECOND;
 
   for (i = 0; i < total->config.ncores; i++)
   {
-    total->interval_sent += __atomic_exchange_n(&clients[i].interval_sent,
+    __u64 sent = __atomic_exchange_n(&clients[i].interval_sent,
         0, __ATOMIC_RELAXED);
-    total->interval_received += __atomic_exchange_n(&clients[i].interval_received,
+    __u64 received = __atomic_exchange_n(&clients[i].interval_received,
         0, __ATOMIC_RELAXED);
-    total->interval_sent_bytes += __atomic_exchange_n(
-        &clients[i].interval_sent_bytes, 0, __ATOMIC_RELAXED);
-    total->interval_received_bytes += __atomic_exchange_n(
+    __u64 sent_bytes = __atomic_exchange_n(&clients[i].interval_sent_bytes,
+        0, __ATOMIC_RELAXED);
+    __u64 received_bytes = __atomic_exchange_n(
         &clients[i].interval_received_bytes, 0, __ATOMIC_RELAXED);
+
+    total->interval_sent += sent;
+    total->interval_received += received;
+    total->interval_sent_bytes += sent_bytes;
+    total->interval_received_bytes += received_bytes;
+    printf("Core %u: [ %3llus ] ", i,
+        (unsigned long long) ((now - total->start_ns) / NS_PER_SECOND));
+    print_rates(sent, received, sent_bytes, received_bytes, seconds);
+    printf(" | RTT percentiles (us): ");
+    print_latency(&rtt_hist[i], "");
   }
 }
 
@@ -574,7 +590,7 @@ int main(int argc, char **argv)
     now = now_ns();
     if (!abort_start && now >= total.next_report_ns && now < total.end_ns)
     {
-      collect_interval(&total, clients);
+      collect_interval(&total, clients, now);
       print_interval(&total, now);
     }
     if (done < started)
@@ -598,12 +614,14 @@ int main(int argc, char **argv)
   }
   if (!abort_start)
   {
-    collect_interval(&total, clients);
     now = now_ns();
     if (now > total.end_ns)
       now = total.end_ns;
     if (now > total.last_report_ns)
+    {
+      collect_interval(&total, clients, now);
       print_interval(&total, now);
+    }
     print_summary(&total, clients);
   }
   for (i = 0; i < config.ncores; i++)
