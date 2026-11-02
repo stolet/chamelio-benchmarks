@@ -324,8 +324,11 @@ static int finish_request(struct client *client, struct homa_etran_event *event)
 
       if (((const unsigned char *) event->data)[j] != expected)
       {
-        fprintf(stderr, "Echo mismatch in request %llu, byte %u\n",
-            (unsigned long long) rpc->sequence, j);
+        fprintf(stderr, "Core %u: Echo mismatch in request %llu, byte %u "
+            "(expected %u, received %u)\n", client->config.worker,
+            (unsigned long long) rpc->sequence, j, expected,
+            ((const unsigned char *) event->data)[j]);
+        client->errors++;
         return -1;
       }
     }
@@ -419,7 +422,7 @@ static void print_interval(struct client *client, __u64 now)
 
 static void print_summary(struct client *client, struct client *clients)
 {
-  __u64 stop_ns = now_ns();
+  __u64 stop_ns = client->last_report_ns;
   unsigned int i;
   double seconds;
   double load, throughput, payload_mbits;
@@ -433,6 +436,8 @@ static void print_summary(struct client *client, struct client *clients)
   payload_mbits = client->sent_bytes * 8.0 / seconds / 1000000.0;
 
   printf("Total summary:\n");
+  printf("Measurement time    : %.6f s (requested %u s)\n",
+      seconds, client->config.duration);
   printf("Cores               : %u\n", client->config.ncores);
   printf("TX requests         : %llu\n", (unsigned long long) client->sent);
   printf("RX replies          : %llu\n", (unsigned long long) client->received);
@@ -623,6 +628,7 @@ int main(int argc, char **argv)
       print_interval(&total, now);
     }
     print_summary(&total, clients);
+    printf("Benchmark result: %s\n", ret ? "FAILED" : "COMPLETED");
   }
   for (i = 0; i < config.ncores; i++)
     hist_cleanup(&rtt_hist[i]);
