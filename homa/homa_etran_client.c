@@ -222,7 +222,7 @@ static int is_send_allowed(struct client *client, __u64 now)
 
   return now < client->end_ns &&
       client->active < CLIENT_MPENDING(client) &&
-      client->tokens >= CLIENT_MSIZE(client);
+      (client->config.window_mode || client->tokens >= CLIENT_MSIZE(client));
 }
 
 static int send_requests(struct client *client)
@@ -266,7 +266,8 @@ static int send_requests(struct client *client)
     client->sent++;
     if (client->start_ns != 0)
     {
-      client->tokens -= CLIENT_MSIZE(client);
+      if (!client->config.window_mode)
+        client->tokens -= CLIENT_MSIZE(client);
       __atomic_fetch_add(&client->interval_sent, 1, __ATOMIC_RELAXED);
       client->sent_bytes += CLIENT_MSIZE(client);
       __atomic_fetch_add(&client->interval_sent_bytes,
@@ -545,8 +546,16 @@ int main(int argc, char **argv)
   printf("Homa benchmark: ncores=%u\n", config.ncores);
   for (i = 0; i < config.ncores; i++)
   {
-    printf("Worker %u: msize=%u, rate=%.2f Mb/s, mpending=%u\n", i,
-        config.msize[i], config.rate[i], config.mpending[i]);
+    if (config.window_mode)
+    {
+      printf("Worker %u: msize=%u, rate-limit=window, window=%u\n", i,
+          config.msize[i], config.mpending[i]);
+    }
+    else
+    {
+      printf("Worker %u: msize=%u, rate-limit=rate, rate=%.2f Mb/s, mpending=%u\n",
+          i, config.msize[i], config.rate[i], config.mpending[i]);
+    }
   }
   printf("One startup echo per endpoint is excluded from measurements.\n");
   printf("Rates count request/reply payload bytes in one direction.\n");

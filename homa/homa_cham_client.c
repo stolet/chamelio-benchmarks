@@ -208,7 +208,7 @@ static int is_send_allowed(struct client *client, __u64 now)
     return client->sent == 0;
 
   return now < client->end_ns && client->active < client->config.mpending &&
-      client->tokens >= client->config.msize;
+      (client->config.window_mode || client->tokens >= client->config.msize);
 }
 
 static int send_requests(struct client *client)
@@ -252,7 +252,8 @@ static int send_requests(struct client *client)
     client->sent++;
     if (client->start_ns != 0)
     {
-      client->tokens -= client->config.msize;
+      if (!client->config.window_mode)
+        client->tokens -= client->config.msize;
       __atomic_fetch_add(&client->interval_sent, 1, __ATOMIC_RELAXED);
     }
   }
@@ -461,8 +462,17 @@ int main(int argc, char **argv)
   calibrate_tsc();
   total.config = config;
 
-  printf("Homa benchmark: ncores=%u, msize=%u, rate=%.2f Mb/s per endpoint, "
-      "mpending=%u\n", config.ncores, config.msize, config.rate, config.mpending);
+  if (config.window_mode)
+  {
+    printf("Homa benchmark: ncores=%u, msize=%u, rate-limit=window, window=%u\n",
+        config.ncores, config.msize, config.mpending);
+  }
+  else
+  {
+    printf("Homa benchmark: ncores=%u, msize=%u, rate-limit=rate, "
+        "rate=%.2f Mb/s per endpoint, mpending=%u\n",
+        config.ncores, config.msize, config.rate, config.mpending);
+  }
   printf("One startup echo per endpoint is excluded from measurements.\n");
   printf("Rates count request/reply payload bytes in one direction.\n");
   printf("RTTs include drained replies; throughput uses the load interval.\n");

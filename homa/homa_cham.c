@@ -24,6 +24,9 @@ int homa_cham_parse(struct homa_cham_config *config, int argc, char **argv,
   int first = client ? 5 : 3;
   int i;
   const char *cores = NULL;
+  int rate_given = 0;
+  int window_given = 0;
+  int pending_given = 0;
 
   memset(config, 0, sizeof(*config));
   config->msize = 64;
@@ -57,8 +60,28 @@ int homa_cham_parse(struct homa_cham_config *config, int argc, char **argv,
       continue;
     }
 
+    if (client && strcmp(argv[i], "--rate-limit") == 0)
+    {
+      const char *mode = argv[++i];
+      if (strcmp(mode, "rate") != 0 && strcmp(mode, "window") != 0)
+        goto failed;
+      config->window_mode = strcmp(mode, "window") == 0;
+      continue;
+    }
+
+    if (client && strcmp(argv[i], "--window") == 0)
+    {
+      window_given = 1;
+      if (parse_number(argv[++i], &value) != 0 ||
+          value == 0 || value > HOMA_CHAM_MAX_PENDING)
+        goto failed;
+      config->mpending = value;
+      continue;
+    }
+
     if (client && strcmp(argv[i], "--rate") == 0)
     {
+      rate_given = 1;
       if (parse_rate(argv[++i], &config->rate) != 0)
         goto failed;
       continue;
@@ -79,12 +102,20 @@ int homa_cham_parse(struct homa_cham_config *config, int argc, char **argv,
       config->duration = value;
     else if (client && strcmp(argv[i], "--mpending") == 0 &&
         value > 0 && value <= HOMA_CHAM_MAX_PENDING)
+    {
+      pending_given = 1;
       config->mpending = value;
+    }
     else
       goto failed;
 
     i++;
   }
+
+  if (client && ((config->window_mode &&
+      (!window_given || rate_given || pending_given)) ||
+      (!config->window_mode && window_given)))
+    goto failed;
 
   if (client && config->msize == 0)
     goto failed;
@@ -109,7 +140,7 @@ failed:
   fprintf(stderr, "Usage: %s <bind_ip> <port>%s"
       " [--msize 0..1000000] [--ncores N] [--cores CPU,...]%s\n", argv[0],
       client ? " <rem_ip> <rem_port>" : "",
-      client ? " [--duration S] [--rate Mb/s]"
+      client ? " [--duration S] [--rate-limit rate|window] [--window N] [--rate Mb/s]"
       " [--mpending 1..128] [--validate]" : "");
   return -1;
 }

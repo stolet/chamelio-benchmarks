@@ -28,6 +28,9 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
   int first = client ? 5 : 3;
   int i;
   const char *cores = NULL;
+  int rate_given = 0;
+  int window_given = 0;
+  int pending_given = 0;
   const char *msize = NULL;
   const char *mpending = NULL;
   const char *rate = NULL;
@@ -67,14 +70,32 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
       continue;
     }
 
+    if (client && strcmp(argv[i], "--rate-limit") == 0)
+    {
+      const char *mode = argv[++i];
+      if (strcmp(mode, "rate") != 0 && strcmp(mode, "window") != 0)
+        goto failed;
+      config->window_mode = strcmp(mode, "window") == 0;
+      continue;
+    }
+
+    if (client && strcmp(argv[i], "--window") == 0)
+    {
+      window_given = 1;
+      mpending = argv[++i];
+      continue;
+    }
+
     if (client && strcmp(argv[i], "--rate") == 0)
     {
+      rate_given = 1;
       rate = argv[++i];
       continue;
     }
 
     if (client && strcmp(argv[i], "--mpending") == 0)
     {
+      pending_given = 1;
       mpending = argv[++i];
       continue;
     }
@@ -95,6 +116,11 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
 
     i++;
   }
+
+  if (client && ((config->window_mode &&
+      (!window_given || rate_given || pending_given)) ||
+      (!config->window_mode && window_given)))
+    goto failed;
 
   /* RpcSocket caches the supplied port; it cannot use an ephemeral port.
    * eTran cannot transmit empty messages. */
@@ -132,7 +158,7 @@ failed:
   fprintf(stderr, "Usage: %s <bind_ip> <port>%s"
       " [--msize B[,B...]] [--ncores N] [--cores CPU,...]%s\n", argv[0],
       client ? " <rem_ip> <rem_port>" : "",
-      client ? " [--duration S] [--rate Mb/s[,Mb/s...]]"
+      client ? " [--duration S] [--rate-limit rate|window] [--window N] [--rate Mb/s[,Mb/s...]]"
       " [--mpending N[,N...]] [--validate]" : "");
   return -1;
 }

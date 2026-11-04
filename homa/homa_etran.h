@@ -32,6 +32,8 @@ struct homa_etran_config
   double rate[HOMA_ETRAN_MAX_CORES];
   /* Check all echoed payload bytes. */
   int validate;
+  /* Send whenever an outstanding RPC slot is available. */
+  int window_mode;
   /* Number of workers */
   unsigned int ncores;
   /* Optional worker CPUs; -1 inherits process affinity. */

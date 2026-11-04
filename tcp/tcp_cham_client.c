@@ -3,7 +3,7 @@
  *
  * Usage:
  *   ./tcp_linux_client <src_ip> <src_port> <rem_ip> <rem_port>
- *     [--msize N] [--duration S] [--rate R] [--ncores N]
+ *     [--msize N] [--duration S] [--rate-limit rate|window] [--rate R | --window N] [--ncores N]
  *
  *   --msize Total TCP payload bytes.
  *   --duration Duration in seconds to run benchmark
@@ -28,6 +28,7 @@
 #include <time.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <limits.h>
 #include <pthread.h>
 #include <fcntl.h>
 #include <linux/types.h>
@@ -45,6 +46,7 @@ struct conn {
   int fd;
   int ready;
   __u8 connected;
+  unsigned int outstanding;
   int tx_remain;
   __u8 *txbuf;
   int rx_remain;
@@ -83,6 +85,8 @@ struct core {
 size_t msize = 64;
 int duration = 30;
 double rate = 10.0;
+int window_mode = 0;
+unsigned int window = 0;
 int ncores = 1;
 int nconns = 1;
 int mpending = 0;
@@ -115,11 +119,13 @@ static struct hist_state rtt_hist = { 0 };
 
 static inline int parse_args(int argc, char **argv)
 {
+  int rate_given = 0;
+  int window_given = 0;
   if (argc < 3)
   {
     fprintf(stderr,
         "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N]"
-        " [--duration S] [--rate R] [--ncores N]"
+        " [--duration S] [--rate-limit rate|window] [--rate R | --window N] [--ncores N]"
         " [--nconns N] [--mpending N] [--cwait S]"
         " [--burst] [--burst-dur-mean US] [--burst-dur-std US]"
         " [--burst-per-mean US] [--burst-per-std US]\n",
@@ -155,8 +161,33 @@ static inline int parse_args(int argc, char **argv)
     {
       duration = atoi(argv[++i]);
     }
+    else if (strcmp(argv[i], "--rate-limit") == 0 && i + 1 < argc)
+    {
+      const char *mode = argv[++i];
+      if (strcmp(mode, "rate") != 0 && strcmp(mode, "window") != 0)
+      {
+        fprintf(stderr, "rate-limit must be rate or window\n");
+        return -1;
+      }
+      window_mode = strcmp(mode, "window") == 0;
+    }
+    else if (strcmp(argv[i], "--window") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *text == '\0' || *end != '\0' ||
+          value == 0 || value > UINT_MAX)
+      {
+        fprintf(stderr, "window must be a positive integer\n");
+        return -1;
+      }
+      window = value;
+      window_given = 1;
+    }
     else if (strcmp(argv[i], "--rate") == 0 && i + 1 < argc)
     {
+      rate_given = 1;
       rate = strtod(argv[++i], NULL);
     }
     else if ((strcmp(argv[i], "--ncores") == 0) && i + 1 < argc)
@@ -200,6 +231,13 @@ static inline int parse_args(int argc, char **argv)
       fprintf(stderr, "Unknown arg: %s\n", argv[i]);
       return -1;
     }
+  }
+
+  if ((window_mode && (!window_given || rate_given)) ||
+      (!window_mode && window_given))
+  {
+    fprintf(stderr, "Use --rate-limit rate --rate R or --rate-limit window --window N\n");
+    return -1;
   }
 
   if (rate <= 0.0)
@@ -388,6 +426,7 @@ static inline void core_init(struct core *c)
     con->ready = 0;
     con->tokens  = 0.0;
     con->connected = 0;
+    con->outstanding = 0;
     con->tx_remain = msize;
     con->rx_remain = msize;
     con->next = -1;
@@ -442,7 +481,12 @@ static inline int conn_tx(struct core *c, struct conn *con)
   int ntx, pos;
   struct payload_hdr *ph;
   
-  while (con->tokens >= con->tx_remain)
+  if (burst && !con->burst.on)
+    return 0;
+
+  while (window_mode ?
+      (con->tx_remain != msize || con->outstanding < window) :
+      con->tokens >= con->tx_remain)
   {
     assert(con->tx_remain != 0);
     
@@ -460,8 +504,11 @@ static inline int conn_tx(struct core *c, struct conn *con)
     if (ntx <= 0)
       return -1;
       
+    if (window_mode && con->tx_remain == msize)
+      con->outstanding++;
     con->tx_remain -= ntx;
-    con->tokens -= ntx;
+    if (!window_mode)
+      con->tokens -= ntx;
     __sync_fetch_and_add(&c->txb_load_interval, ntx);
     if (con->tx_remain == 0)
     {
@@ -541,6 +588,11 @@ static inline void conn_rx(struct core *c, struct conn *con)
       ph = (struct payload_hdr *) con->rxbuf;
       rtt_us = us_since_tsc(ph->tsc);
       c->total_rx_pkts++;
+      if (window_mode)
+      {
+        assert(con->outstanding > 0);
+        con->outstanding--;
+      }
       con->rx_remain = msize;
       __sync_fetch_and_add(&c->txp_tp_interval, 1);
       hist_add(&rtt_hist, rtt_us);

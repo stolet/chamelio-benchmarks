@@ -30,6 +30,8 @@ struct homa_linux_config
   double rate;
   /* Check all echoed payload bytes. */
   int validate;
+  /* Send whenever an outstanding RPC slot is available. */
+  int window_mode;
   /* Number of workers */
   unsigned int ncores;
   /* Optional worker CPUs; -1 inherits process affinity. */
