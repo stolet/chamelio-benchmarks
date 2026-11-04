@@ -10,11 +10,19 @@ static int server_worker(void *arg)
   struct homa_context_lib *ctx;
   struct homa_event event;
   int fd, ret;
+  unsigned char *reply;
 
   fd = homa_cham_init(&config, &ctx);
   if (fd < 0)
   {
     perror("Homa server initialization");
+    return 1;
+  }
+
+  reply = config.rsize > config.msize ? malloc(config.rsize) : NULL;
+  if (config.rsize > config.msize && reply == NULL)
+  {
+    perror("allocate response buffer");
     return 1;
   }
 
@@ -49,11 +57,15 @@ static int server_worker(void *arg)
 
     if (control)
       startup.ncores = htonl(config.ncores);
+    else if (config.rsize > config.msize)
+      memcpy(reply, event.data, event.len);
 
     do
     {
       ret = homa_lib_reply(ctx, fd, event.rpc_id,
-          control ? (void *) &startup : event.data, event.len);
+          control ? (void *) &startup :
+          (config.rsize <= config.msize ? event.data : reply),
+          control ? event.len : config.rsize);
     } while (ret != 0 && errno == EAGAIN);
 
     if (ret != 0)
@@ -74,6 +86,7 @@ static int server_worker(void *arg)
     }
   }
 
+  free(reply);
   homa_lib_ctx_free(ctx);
   return 1;
 }
@@ -97,8 +110,8 @@ int main(int argc, char **argv)
     workers[i].run = server_worker;
     workers[i].client = 0;
   }
-  printf("Homa echo server: msize=%u, ncores=%u\n",
-      config.msize, config.ncores);
+  printf("Homa echo server: msize=%u, rsize=%u, ncores=%u\n",
+      config.msize, config.rsize, config.ncores);
   fflush(stdout);
   return homa_run_workers(workers, config.ncores);
 }

@@ -1,5 +1,5 @@
 /* Usage:
- *   ./udp_demi_server <src_bind_ip> <src_port> <rem_bind_ip> <rem_port> [--msize N] [--ncores N] [--buf-size N]
+ *   ./udp_demi_server <src_bind_ip> <src_port> <rem_bind_ip> <rem_port> [--msize N] [--rsize N] [--ncores N] [--buf-size N]
  *
  * Example:
  *   ./udp_linux_server 0.0.0.0 9000 0.0.0.1 9001 --msize 64 --ncores 2 --buf-size 4096
@@ -12,6 +12,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <arpa/inet.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -44,6 +45,7 @@ struct core {
 
 /* Default arg values */
 size_t msize = 64;
+size_t rsize = 0;
 size_t bsize = 4096;
 int ncores = 1;
 
@@ -70,7 +72,7 @@ static inline int parse_args(int argc, char **argv)
   if (argc < 5)
   {
     fprintf(stderr, "Usage: %s <src_bind_ip> <src_port> <rem_bind_ip> <rem_port>" 
-        " [--msize N] [--ncores N] [--buf-size]\n", argv[0]);
+        " [--msize N] [--rsize N] [--ncores N] [--buf-size]\n", argv[0]);
     return -1;
   }
 
@@ -97,6 +99,18 @@ static inline int parse_args(int argc, char **argv)
     {
       msize = (size_t)strtoul(argv[++i], NULL, 10);
     }
+    else if (strcmp(argv[i], "--rsize") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *end != '\0' || value < 32 || value > INT_MAX)
+      {
+        fprintf(stderr, "rsize must be between 32 and INT_MAX bytes\n");
+        return -1;
+      }
+      rsize = value;
+    }
     else if (strcmp(argv[i], "--ncores") == 0 && i + 1 < argc)
     {
       ncores = (size_t)strtoul(argv[++i], NULL, 10);
@@ -110,6 +124,15 @@ static inline int parse_args(int argc, char **argv)
       fprintf(stderr, "Unknown arg: %s\n", argv[i]);
       return -1;
     }
+  }
+
+  if (rsize == 0)
+    rsize = msize;
+  if (msize < 32 || rsize < 32 || rsize > INT_MAX ||
+      msize > INT_MAX || bsize < msize || bsize > INT_MAX)
+  {
+    fprintf(stderr, "require 32 <= msize <= buf-size <= INT_MAX and 32 <= rsize <= INT_MAX\n");
+    return -1;
   }
 
   return 0;
@@ -182,7 +205,7 @@ static inline void core_init(struct core *c)
     abort();
   }
 
-  c->sga = demi_sgaalloc(msize);
+  c->sga = demi_sgaalloc(rsize);
   if (c->sga.sga_numsegs == 0)
   {
     fprintf(stderr, "failed to allocate sga\n");
@@ -226,8 +249,9 @@ static inline void core_rx(struct core *c)
       assert(c->res.qr_opcode == DEMI_OPC_POP);
       assert(c->res.qr_value.sga.sga_numsegs == 1);
       assert(c->res.qr_value.sga.segments[0].data_len_bytes == msize);
-      memcpy(c->sga.segments[0].data_buf_ptr, 
-          c->res.qr_value.sga.segments[0].data_buf_ptr, msize);
+      memcpy(c->sga.segments[0].data_buf_ptr,
+          c->res.qr_value.sga.segments[0].data_buf_ptr,
+          msize < rsize ? msize : rsize);
       __sync_fetch_and_add(&c->rxb_interval, msize);
       __sync_fetch_and_add(&c->rxp_interval, 1);
       c->rxqt = -1;
@@ -244,7 +268,7 @@ static inline void core_tx(struct core *c)
   if (c->txqt == -1 && c->popped)
   {
     c->sga.sga_numsegs = 1;
-    c->sga.segments[0].data_len_bytes = msize;
+    c->sga.segments[0].data_len_bytes = rsize;
     assert(demi_pushto(&c->txqt, c->fd, &c->sga, 
         (const struct sockaddr *) &c->dst_addr, c->dst_len) == 0);
     c->popped = 0;
@@ -259,7 +283,7 @@ static inline void core_tx(struct core *c)
     {
       assert(c->res.qr_opcode == DEMI_OPC_PUSH);
       __sync_fetch_and_add(&c->txp_interval, 1);
-      __sync_fetch_and_add(&c->txb_interval, msize);
+      __sync_fetch_and_add(&c->txb_interval, rsize);
       c->txqt = -1;
     }
   }

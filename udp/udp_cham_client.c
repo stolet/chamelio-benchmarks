@@ -3,7 +3,7 @@
  *
  * Usage:
  *   ./udp_cham_client <src_ip> <src_port> <rem_ip> <rem_port>
- *     [--msize N] [--duration S] [--rate R] [--ncores N] [--cores LIST]
+ *     [--msize N] [--rsize N] [--duration S] [--rate R] [--ncores N] [--cores LIST]
  *
  *   --msize Total UDP payload bytes.
  *   --duration Duration in seconds to run benchmark
@@ -21,6 +21,7 @@
 #include <chamelio/udp_lib.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <assert.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -66,6 +67,7 @@ struct core {
 
 /* Default arg values */
 size_t msize = 64;
+size_t rsize = 0;
 int duration = 30;
 double rate = 10.0;
 int ncores = 1;
@@ -197,7 +199,7 @@ static inline int parse_args(int argc, char **argv)
   if (argc < 3)
   {
     fprintf(stderr,
-        "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N]"
+        "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N] [--rsize N]"
         " [--duration S] [--rate R] [--ncores N] [--cores LIST]"
         " [--burst] [--burst-dur-mean US] [--burst-dur-std US]"
         " [--burst-per-mean US] [--burst-per-std US]\n",
@@ -234,6 +236,18 @@ static inline int parse_args(int argc, char **argv)
     else if (strcmp(argv[i], "--rate") == 0 && i + 1 < argc)
     {
       rate = strtod(argv[++i], NULL);
+    }
+    else if (strcmp(argv[i], "--rsize") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *end != '\0' || value < 32 || value > INT_MAX)
+      {
+        fprintf(stderr, "rsize must be between 32 and INT_MAX bytes\n");
+        return -1;
+      }
+      rsize = value;
     }
     else if ((strcmp(argv[i], "--ncores") == 0) && i + 1 < argc)
     {
@@ -281,10 +295,12 @@ static inline int parse_args(int argc, char **argv)
   if (burst_per_mean < 1.0)
     burst_per_mean = 1.0;
 
-  if (msize < sizeof(struct payload_hdr))
+  if (rsize == 0)
+    rsize = msize;
+
+  if (msize < 32 || msize > INT_MAX || rsize < 32 || rsize > INT_MAX)
   {
-    fprintf(stderr, "msize must be at least %zu bytes (header size)\n",
-        sizeof(struct payload_hdr));
+    fprintf(stderr, "msize and rsize must be between 32 and INT_MAX bytes\n");
     return -1;
   }
 
@@ -386,14 +402,14 @@ static inline struct udp_context_lib * core_init(struct core *c)
   }
 
   c->txbuf = (__u8 *) malloc(msize);
-  c->rxbuf = (__u8 *) malloc(msize);
+  c->rxbuf = (__u8 *) malloc(rsize);
   if (!c->txbuf || !c->rxbuf)
   {
     perror("malloc buffers");
     pthread_exit((void *) (intptr_t) -1);
   }
   memset(c->txbuf, 0, msize);
-  memset(c->rxbuf, 0, msize);
+  memset(c->rxbuf, 0, rsize);
 
   /* Core 0 resolves ARP */
   udp_sendto(udp_ctx, c->fd, c->txbuf, msize, 
@@ -475,8 +491,8 @@ static inline void core_rx(struct udp_context_lib *udp_ctx, struct core *c)
 
   while (1)
   {
-    nrx = udp_recvfrom(udp_ctx, c->fd, c->rxbuf, msize, NULL, 0);
-    assert(nrx == msize || nrx <= 0);
+    nrx = udp_recvfrom(udp_ctx, c->fd, c->rxbuf, rsize, NULL, 0);
+    assert(nrx == rsize || nrx <= 0);
     
     if (nrx <= 0)
       break;
@@ -714,7 +730,7 @@ int main(int argc, char **argv)
       ((double) totalp_tx * msize * 8 / 1000000) / duration);
   printf("Avg Throughput      : %lld rps %.2f Mb/s\n", 
       totalp_rx / duration, 
-      ((double) totalp_rx * msize * 8 / 1000000) / duration);
+      ((double) totalp_rx * rsize * 8 / 1000000) / duration);
   printf("RTT percentiles (us): p50=%llu  p99=%llu  p99.9=%llu\n",
       (unsigned long long) p50,
       (unsigned long long) p99,

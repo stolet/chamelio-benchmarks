@@ -22,6 +22,8 @@ struct homa_linux_config
   struct sockaddr_in remote;
   /* Message payload size, up to 1,000,000 bytes. */
   unsigned int msize;
+  /* Response payload size; defaults to the request size. */
+  unsigned int rsize;
   /* Timed load interval in seconds. */
   unsigned int duration;
   /* Maximum outstanding client RPCs. */

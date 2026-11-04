@@ -16,6 +16,8 @@
 
 #define CLIENT_MSIZE(client) \
     ((client)->config.msize[(client)->config.worker])
+#define CLIENT_RSIZE(client) \
+    ((client)->config.rsize[(client)->config.worker])
 #define CLIENT_MPENDING(client) \
     ((client)->config.mpending[(client)->config.worker])
 #define CLIENT_RATE(client) \
@@ -319,7 +321,7 @@ static int finish_request(struct client *client, struct homa_etran_event *event)
   rtt_us = client->start_ns != 0 ? us_since_tsc(rpc->tsc) : 0;
   if (client->config.validate && client->start_ns != 0)
   {
-    for (j = 0; j < CLIENT_MSIZE(client); j++)
+    for (j = 0; j < CLIENT_MSIZE(client) && j < CLIENT_RSIZE(client); j++)
     {
       unsigned char expected = rpc->sequence + j;
 
@@ -356,9 +358,9 @@ static int finish_request(struct client *client, struct homa_etran_event *event)
     {
       client->window_received++;
       __atomic_fetch_add(&client->interval_received, 1, __ATOMIC_RELAXED);
-      client->window_received_bytes += CLIENT_MSIZE(client);
+      client->window_received_bytes += CLIENT_RSIZE(client);
       __atomic_fetch_add(&client->interval_received_bytes,
-          CLIENT_MSIZE(client), __ATOMIC_RELAXED);
+          CLIENT_RSIZE(client), __ATOMIC_RELAXED);
     }
   }
 
@@ -372,7 +374,7 @@ static int is_reply_valid(struct client *client, struct homa_etran_event *event)
   int same_address =
       event->peer.sin_addr.s_addr == client->config.remote.sin_addr.s_addr;
   int same_port = event->peer.sin_port == client->config.remote.sin_port;
-  int length_valid = event->len == CLIENT_MSIZE(client);
+  int length_valid = event->len == CLIENT_RSIZE(client);
   int success = event->status == 0;
 
   if (client->start_ns == 0)
@@ -548,13 +550,13 @@ int main(int argc, char **argv)
   {
     if (config.window_mode)
     {
-      printf("Worker %u: msize=%u, rate-limit=window, window=%u\n", i,
-          config.msize[i], config.mpending[i]);
+      printf("Worker %u: msize=%u, rsize=%u, rate-limit=window, window=%u\n", i,
+          config.msize[i], config.rsize[i], config.mpending[i]);
     }
     else
     {
-      printf("Worker %u: msize=%u, rate-limit=rate, rate=%.2f Mb/s, mpending=%u\n",
-          i, config.msize[i], config.rate[i], config.mpending[i]);
+      printf("Worker %u: msize=%u, rsize=%u, rate-limit=rate, rate=%.2f Mb/s, mpending=%u\n",
+          i, config.msize[i], config.rsize[i], config.rate[i], config.mpending[i]);
     }
   }
   printf("One startup echo per endpoint is excluded from measurements.\n");

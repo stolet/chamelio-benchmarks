@@ -3,7 +3,7 @@
  *
  * Usage:
  *   ./udp_demi_client <src_ip> <src_port> <rem_ip> <rem_port>
- *     [--msize N] [--duration S] [--rate R] [--ncores N]
+ *     [--msize N] [--rsize N] [--duration S] [--rate R] [--ncores N]
  *
  *   --msize Total UDP payload bytes.
  *   --duration Duration in seconds to run benchmark
@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <assert.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -59,6 +60,7 @@ struct core {
 
 /* Default arg values */
 size_t msize = 64;
+size_t rsize = 0;
 int duration = 30;
 double rate = 10.0;
 int ncores = 1;
@@ -89,7 +91,7 @@ static inline int parse_args(int argc, char **argv)
   if (argc < 5)
   {
     fprintf(stderr,
-        "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N]"
+        "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N] [--rsize N]"
         " [--duration S] [--rate R] [--ncores N]\n",
         argv[0]);
     return -1;
@@ -127,6 +129,18 @@ static inline int parse_args(int argc, char **argv)
     {
       rate = strtod(argv[++i], NULL);
     }
+    else if (strcmp(argv[i], "--rsize") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *end != '\0' || value < 32 || value > INT_MAX)
+      {
+        fprintf(stderr, "rsize must be between 32 and INT_MAX bytes\n");
+        return -1;
+      }
+      rsize = value;
+    }
     else if ((strcmp(argv[i], "--ncores") == 0) && i + 1 < argc)
     {
       ncores = atoi(argv[++i]);
@@ -144,10 +158,12 @@ static inline int parse_args(int argc, char **argv)
     return -1;
   }
 
-  if (msize < sizeof(struct payload_hdr))
+  if (rsize == 0)
+    rsize = msize;
+
+  if (msize < 32 || msize > INT_MAX || rsize < 32 || rsize > INT_MAX)
   {
-    fprintf(stderr, "msize must be at least %zu bytes (header size)\n",
-        sizeof(struct payload_hdr));
+    fprintf(stderr, "msize and rsize must be between 32 and INT_MAX bytes\n");
     return -1;
   }
 
@@ -308,11 +324,11 @@ static inline void core_rx(struct core *c)
     {
       assert(c->res.qr_opcode == DEMI_OPC_POP);
       assert(c->res.qr_value.sga.sga_numsegs == 1);
-      assert(c->res.qr_value.sga.segments[0].data_len_bytes == msize);   
+      assert(c->res.qr_value.sga.segments[0].data_len_bytes == rsize);
       ph = (struct payload_hdr *) c->res.qr_value.sga.segments[0].data_buf_ptr;
       rtt_us = us_since_tsc(ph->tsc);
       hist_add(&rtt_hist, rtt_us);
-      __sync_fetch_and_add(&c->txb_tp_interval, msize);
+      __sync_fetch_and_add(&c->txb_tp_interval, rsize);
       __sync_fetch_and_add(&c->txp_tp_interval, 1);
       c->total_rx_pkts++;
       c->rxqt = -1;
@@ -521,7 +537,7 @@ int main(int argc, char **argv)
       ((double) totalp_tx * msize * 8 / 1000000) / duration);
   printf("Avg Throughput      : %lld rps %.2f Mb/s\n", 
       totalp_rx / duration, 
-      ((double) totalp_rx * msize * 8 / 1000000) / duration);
+      ((double) totalp_rx * rsize * 8 / 1000000) / duration);
   printf("RTT percentiles (us): p50=%llu  p99=%llu  p99.9=%llu\n",
       (unsigned long long) p50,
       (unsigned long long) p99,

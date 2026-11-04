@@ -22,8 +22,10 @@ struct homa_etran_config
   struct sockaddr_in remote;
   /* Worker index used to select per-worker settings. */
   unsigned int worker;
-  /* Message payload size per worker, 1..1,000,000 bytes. */
+  /* Message payload size per worker, 32..1,000,000 bytes. */
   unsigned int msize[HOMA_ETRAN_MAX_CORES];
+  /* Response payload size per worker; defaults to the request size. */
+  unsigned int rsize[HOMA_ETRAN_MAX_CORES];
   /* Timed load interval in seconds. */
   unsigned int duration;
   /* Maximum outstanding client RPCs per worker. */

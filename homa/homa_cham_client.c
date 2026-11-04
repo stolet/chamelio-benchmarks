@@ -302,7 +302,7 @@ static int finish_request(struct client *client, struct homa_event *event)
   rtt_us = client->start_ns != 0 ? us_since_tsc(rpc->tsc) : 0;
   if (client->config.validate && client->start_ns != 0)
   {
-    for (j = 0; j < client->config.msize; j++)
+    for (j = 0; j < client->config.msize && j < client->config.rsize; j++)
     {
       unsigned char expected = rpc->sequence + j;
 
@@ -349,7 +349,7 @@ static int is_reply_valid(struct client *client, struct homa_event *event)
   int same_address =
       event->peer.sin_addr.s_addr == client->config.remote.sin_addr.s_addr;
   int same_port = event->peer.sin_port == client->config.remote.sin_port;
-  int length_valid = event->len == client->config.msize;
+  int length_valid = event->len == client->config.rsize;
   int success = event->status == 0;
 
   if (client->start_ns == 0)
@@ -380,7 +380,7 @@ static void print_interval(struct client *client, __u64 now)
       "tp=%llu rps | tp=%.2f Mb/s | ",
       (unsigned long long) ((now - client->start_ns) / NS_PER_SECOND),
       (unsigned long long) load, load * payload_mbits,
-      (unsigned long long) throughput, throughput * payload_mbits);
+      (unsigned long long) throughput, throughput * client->config.rsize * 8.0 / 1000000.0);
   print_latency(&rtt_hist, " us");
   fflush(stdout);
   client->interval_sent = 0;
@@ -410,7 +410,7 @@ static void print_summary(struct client *client)
   printf("Avg Load            : %llu rps %.2f Mb/s\n",
       (unsigned long long) load, load * payload_mbits);
   printf("Avg Throughput      : %llu rps %.2f Mb/s\n",
-      (unsigned long long) throughput, throughput * payload_mbits);
+      (unsigned long long) throughput, throughput * client->config.rsize * 8.0 / 1000000.0);
   printf("RTT percentiles (us): ");
   print_latency(&rtt_hist, "");
   fflush(stdout);
@@ -464,14 +464,14 @@ int main(int argc, char **argv)
 
   if (config.window_mode)
   {
-    printf("Homa benchmark: ncores=%u, msize=%u, rate-limit=window, window=%u\n",
-        config.ncores, config.msize, config.mpending);
+    printf("Homa benchmark: ncores=%u, msize=%u, rsize=%u, rate-limit=window, window=%u\n",
+        config.ncores, config.msize, config.rsize, config.mpending);
   }
   else
   {
-    printf("Homa benchmark: ncores=%u, msize=%u, rate-limit=rate, "
+    printf("Homa benchmark: ncores=%u, msize=%u, rsize=%u, rate-limit=rate, "
         "rate=%.2f Mb/s per endpoint, mpending=%u\n",
-        config.ncores, config.msize, config.rate, config.mpending);
+        config.ncores, config.msize, config.rsize, config.rate, config.mpending);
   }
   printf("One startup echo per endpoint is excluded from measurements.\n");
   printf("Rates count request/reply payload bytes in one direction.\n");

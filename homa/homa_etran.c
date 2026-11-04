@@ -32,6 +32,7 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
   int window_given = 0;
   int pending_given = 0;
   const char *msize = NULL;
+  const char *rsize = NULL;
   const char *mpending = NULL;
   const char *rate = NULL;
 
@@ -67,6 +68,12 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
     if (strcmp(argv[i], "--msize") == 0)
     {
       msize = argv[++i];
+      continue;
+    }
+
+    if (strcmp(argv[i], "--rsize") == 0)
+    {
+      rsize = argv[++i];
       continue;
     }
 
@@ -131,12 +138,23 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
   }
 
   if (parse_unsigned_list(msize ? msize : "64", config->msize,
-      config->ncores, 1, HOMA_ETRAN_MAX_MESSAGE) != 0 ||
+      config->ncores, 32, HOMA_ETRAN_MAX_MESSAGE) != 0 ||
       parse_unsigned_list(mpending ? mpending : "16", config->mpending,
       config->ncores, 1, HOMA_ETRAN_MAX_PENDING) != 0 ||
       parse_rate_list(rate ? rate : "10.0", config->rate,
       config->ncores) != 0)
     goto failed;
+
+  if (rsize != NULL)
+  {
+    if (parse_unsigned_list(rsize, config->rsize, config->ncores,
+        32, HOMA_ETRAN_MAX_MESSAGE) != 0)
+      goto failed;
+  }
+  else
+  {
+    memcpy(config->rsize, config->msize, sizeof(config->rsize));
+  }
 
   unsigned int local_port = ntohs(config->local.sin_port);
   unsigned int remote_port = ntohs(config->remote.sin_port);
@@ -156,7 +174,7 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
 
 failed:
   fprintf(stderr, "Usage: %s <bind_ip> <port>%s"
-      " [--msize B[,B...]] [--ncores N] [--cores CPU,...]%s\n", argv[0],
+      " [--msize B[,B...]] [--rsize B[,B...]] [--ncores N] [--cores CPU,...]%s\n", argv[0],
       client ? " <rem_ip> <rem_port>" : "",
       client ? " [--duration S] [--rate-limit rate|window] [--window N] [--rate Mb/s[,Mb/s...]]"
       " [--mpending N[,N...]] [--validate]" : "");

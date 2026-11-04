@@ -1,5 +1,5 @@
 /* Usage:
- *   ./tcp_cham_server <bind_ip> <port> [--msize N] [--ncores N] [--buf-size N]
+ *   ./tcp_cham_server <bind_ip> <port> [--msize N] [--rsize N] [--ncores N] [--buf-size N]
  *
  * Example:
  *   ./tcp_cham_server 0.0.0.0 9000 --msize 64 --ncores 2 --buf-size 4096
@@ -38,6 +38,7 @@ struct conn {
   int ntx;
   int nready; /* Bytes in complete requests whose operation iterations have finished. */
   __u8 *buf;
+  __u8 *reply;
 };
 
 struct core {
@@ -66,6 +67,7 @@ static struct op_iters_config iters_config;
 
 /* Default arg values */
 size_t msize = 64;
+size_t rsize = 0;
 size_t bsize = 4096;
 int ncores = 1;
 int mconns = 1;
@@ -89,7 +91,7 @@ static inline int parse_args(int argc, char **argv)
   if (argc < 3)
   {
     fprintf(stderr, "Usage: %s <bind_ip> <port>" 
-        " [--msize N] [--ncores N] [--buf-size N]"
+        " [--msize N] [--rsize N] [--ncores N] [--buf-size N]"
         " [--op-iters N] [--op-iters-avx 256|512]\n", argv[0]);
     return -1;
   }
@@ -114,6 +116,18 @@ static inline int parse_args(int argc, char **argv)
     {
       msize = (size_t)strtoul(argv[++i], NULL, 10);
     }
+    else if (strcmp(argv[i], "--rsize") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *end != '\0' || value < 32 || value > INT_MAX)
+      {
+        fprintf(stderr, "rsize must be between 32 and INT_MAX bytes\n");
+        return -1;
+      }
+      rsize = value;
+    }
     else if (strcmp(argv[i], "--ncores") == 0 && i + 1 < argc)
     {
       ncores = (size_t)strtoul(argv[++i], NULL, 10);
@@ -137,6 +151,15 @@ static inline int parse_args(int argc, char **argv)
       (msize == 0 || msize > INT_MAX || bsize < msize || bsize > INT_MAX))
   {
     fprintf(stderr, "op-iters requires 0 < msize <= buf-size <= INT_MAX\n");
+    return -1;
+  }
+
+  if (rsize == 0)
+    rsize = msize;
+  if (msize < 32 || rsize < 32 || rsize > INT_MAX ||
+      msize > INT_MAX || bsize < msize || bsize > INT_MAX)
+  {
+    fprintf(stderr, "require 32 <= msize <= buf-size <= INT_MAX and 32 <= rsize <= INT_MAX\n");
     return -1;
   }
 
@@ -274,6 +297,12 @@ static inline void core_init(struct core *c)
       fprintf(stderr, "failed to malloc tx buf");
       abort();
     }
+    con->reply = rsize > msize ? malloc(rsize) : NULL;
+    if (rsize > msize && con->reply == NULL)
+    {
+      perror("allocate response buffer");
+      abort();
+    }
     con->buf = buf;
     memset(con->buf, 0, bsize);
     
@@ -282,7 +311,7 @@ static inline void core_init(struct core *c)
     con->nrx = 0;
     con->ntx = 0;
     con->nready = 0;
-    con->tx_remain = msize;
+    con->tx_remain = rsize;
     con->rx_remain = msize;
   }
 
@@ -318,8 +347,8 @@ static inline void conn_rx(struct core *c, struct conn *con)
       if (iters_config.iterations > 0)
       {
         op_iters_run(&iters_config, &c->iters_state);
-        con->nready = con->nrx;
       }
+      con->nready = con->nrx;
       con->rx_remain = msize;
       __sync_fetch_and_add(&c->rxp_interval, 1);
     }
@@ -329,18 +358,20 @@ static inline void conn_rx(struct core *c, struct conn *con)
 static inline void conn_tx(struct core *c, struct conn *con)
 {
   int ntx, ret, tx_len;
-  int tx_end = iters_config.iterations > 0 ? con->nready : con->nrx;
+  int tx_end = con->nready;
 
   while (con->ntx < tx_end)
   {
     assert(con->tx_remain != 0);
-    tx_len = tx_end - con->ntx;
-    if (tx_len > con->tx_remain)
-      tx_len = con->tx_remain;
+    tx_len = con->tx_remain;
+    if (con->reply != NULL && con->tx_remain == rsize)
+      memcpy(con->reply, con->buf + con->ntx, msize);
+    const __u8 *reply = con->reply != NULL ? con->reply : con->buf + con->ntx;
+    reply += rsize - con->tx_remain;
 
-    ntx = tcp_sendto(c->tcp_ctx, con->fd, con->buf + con->ntx, tx_len,
+    ntx = tcp_sendto(c->tcp_ctx, con->fd, reply, tx_len,
         (struct sockaddr *) &c->dst_addr, c->dst_len);
-    assert(ntx <= 0 || (ntx <= msize && ntx <= tx_len));
+    assert(ntx <= 0 || (ntx <= rsize && ntx <= tx_len));
           
     if (ntx <= 0)
     {
@@ -355,12 +386,12 @@ static inline void conn_tx(struct core *c, struct conn *con)
       return;
     }
       
-    con->ntx += ntx;
     con->tx_remain -= ntx;
     __sync_fetch_and_add(&c->txb_interval, ntx);
     if (con->tx_remain == 0)
     {
-      con->tx_remain = msize;
+      con->ntx += msize;
+      con->tx_remain = rsize;
       __sync_fetch_and_add(&c->txp_interval, 1);
     }
   }
@@ -373,18 +404,11 @@ static inline void conn_tx(struct core *c, struct conn *con)
     abort();
   }
   
-  if (iters_config.iterations > 0)
-  {
-    /* Keep the incomplete trailing request; only the ready prefix was sent. */
-    con->nrx -= con->ntx;
-    if (con->nrx > 0 && con->ntx > 0)
-      memmove(con->buf, con->buf + con->ntx, con->nrx);
-    con->nready = 0;
-  }
-  else
-  {
-    con->nrx = 0;
-  }
+  /* Keep requests that have not yet received a complete response. */
+  con->nrx -= con->ntx;
+  if (con->nrx > 0 && con->ntx > 0)
+    memmove(con->buf, con->buf + con->ntx, con->nrx);
+  con->nready -= con->ntx;
   con->ntx = 0;
 }
 

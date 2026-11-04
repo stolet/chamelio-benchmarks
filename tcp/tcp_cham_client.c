@@ -3,7 +3,7 @@
  *
  * Usage:
  *   ./tcp_linux_client <src_ip> <src_port> <rem_ip> <rem_port>
- *     [--msize N] [--duration S] [--rate-limit rate|window] [--rate R | --window N] [--ncores N]
+ *     [--msize N] [--rsize N] [--duration S] [--rate-limit rate|window] [--rate R | --window N] [--ncores N]
  *
  *   --msize Total TCP payload bytes.
  *   --duration Duration in seconds to run benchmark
@@ -83,6 +83,7 @@ struct core {
 
 /* Default arg values */
 size_t msize = 64;
+size_t rsize = 0;
 int duration = 30;
 double rate = 10.0;
 int window_mode = 0;
@@ -124,7 +125,7 @@ static inline int parse_args(int argc, char **argv)
   if (argc < 3)
   {
     fprintf(stderr,
-        "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N]"
+        "Usage: %s <src_ip> <src_port> <rem_ip> <rem_port> [--msize N] [--rsize N]"
         " [--duration S] [--rate-limit rate|window] [--rate R | --window N] [--ncores N]"
         " [--nconns N] [--mpending N] [--cwait S]"
         " [--burst] [--burst-dur-mean US] [--burst-dur-std US]"
@@ -190,6 +191,18 @@ static inline int parse_args(int argc, char **argv)
       rate_given = 1;
       rate = strtod(argv[++i], NULL);
     }
+    else if (strcmp(argv[i], "--rsize") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *end != '\0' || value < 32 || value > INT_MAX)
+      {
+        fprintf(stderr, "rsize must be between 32 and INT_MAX bytes\n");
+        return -1;
+      }
+      rsize = value;
+    }
     else if ((strcmp(argv[i], "--ncores") == 0) && i + 1 < argc)
     {
       ncores = atoi(argv[++i]);
@@ -251,10 +264,12 @@ static inline int parse_args(int argc, char **argv)
   if (burst_per_mean < 1.0)
     burst_per_mean = 1.0;
 
-  if (msize < sizeof(struct payload_hdr))
+  if (rsize == 0)
+    rsize = msize;
+
+  if (msize < 32 || msize > INT_MAX || rsize < 32 || rsize > INT_MAX)
   {
-    fprintf(stderr, "msize must be at least %zu bytes (header size)\n",
-        sizeof(struct payload_hdr));
+    fprintf(stderr, "msize and rsize must be between 32 and INT_MAX bytes\n");
     return -1;
   }
 
@@ -413,14 +428,14 @@ static inline void core_init(struct core *c)
     con = &conns[i];
     con->id = i;
     con->txbuf = (__u8 *) malloc(msize);
-    con->rxbuf = (__u8 *) malloc(msize);
+    con->rxbuf = (__u8 *) malloc(rsize);
     if (con->txbuf == NULL || con->rxbuf == NULL)
     {
       perror("malloc buffers");
       pthread_exit((void *) (intptr_t) -1);
     }
     memset(con->txbuf, 0, msize);
-    memset(con->rxbuf, 0, msize);
+    memset(con->rxbuf, 0, rsize);
     
     con->fd = fd;
     con->ready = 0;
@@ -428,7 +443,7 @@ static inline void core_init(struct core *c)
     con->connected = 0;
     con->outstanding = 0;
     con->tx_remain = msize;
-    con->rx_remain = msize;
+    con->rx_remain = rsize;
     con->next = -1;
     con->last_tsc = util_rdtsc();
     con->burst.on = 0;
@@ -573,10 +588,10 @@ static inline void conn_rx(struct core *c, struct conn *con)
   while (1)
   {
     assert(con->rx_remain != 0);
-    pos = msize - con->rx_remain;
+    pos = rsize - con->rx_remain;
     nrx = tcp_recvfrom(c->tcp_ctx, con->fd, con->rxbuf + pos, 
         con->rx_remain, NULL, 0);
-    assert(nrx <= 0 || (nrx <= msize && nrx <= con->rx_remain));
+    assert(nrx <= 0 || (nrx <= rsize && nrx <= con->rx_remain));
     
     if (nrx <= 0)
       break;
@@ -593,7 +608,7 @@ static inline void conn_rx(struct core *c, struct conn *con)
         assert(con->outstanding > 0);
         con->outstanding--;
       }
-      con->rx_remain = msize;
+      con->rx_remain = rsize;
       __sync_fetch_and_add(&c->txp_tp_interval, 1);
       hist_add(&rtt_hist, rtt_us);
     }
@@ -937,7 +952,7 @@ int main(int argc, char **argv)
       ((double) totalp_tx * msize * 8 / 1000000) / duration);
   printf("Avg Throughput      : %lld rps %.2f Mb/s\n", 
       totalp_rx / duration, 
-      ((double) totalp_rx * msize * 8 / 1000000) / duration);
+      ((double) totalp_rx * rsize * 8 / 1000000) / duration);
   printf("RTT percentiles (us): p50=%llu  p99=%llu  p99.9=%llu\n",
       (unsigned long long) p50,
       (unsigned long long) p99,

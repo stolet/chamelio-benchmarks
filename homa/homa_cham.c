@@ -87,6 +87,15 @@ int homa_cham_parse(struct homa_cham_config *config, int argc, char **argv,
       continue;
     }
 
+    if (strcmp(argv[i], "--rsize") == 0)
+    {
+      if (parse_number(argv[++i], &value) != 0 ||
+          value < 32 || value > HOMA_CHAM_MAX_MESSAGE)
+        goto failed;
+      config->rsize = value;
+      continue;
+    }
+
     if (parse_number(argv[i + 1], &value) != 0)
       goto failed;
 
@@ -117,7 +126,10 @@ int homa_cham_parse(struct homa_cham_config *config, int argc, char **argv,
       (!config->window_mode && window_given)))
     goto failed;
 
-  if (client && config->msize == 0)
+  if (config->rsize == 0)
+    config->rsize = config->msize;
+
+  if (config->msize < 32 || config->rsize < 32)
     goto failed;
 
   unsigned int local_port = ntohs(config->local.sin_port);
@@ -138,7 +150,7 @@ int homa_cham_parse(struct homa_cham_config *config, int argc, char **argv,
 
 failed:
   fprintf(stderr, "Usage: %s <bind_ip> <port>%s"
-      " [--msize 0..1000000] [--ncores N] [--cores CPU,...]%s\n", argv[0],
+      " [--msize 32..1000000] [--rsize 32..1000000] [--ncores N] [--cores CPU,...]%s\n", argv[0],
       client ? " <rem_ip> <rem_port>" : "",
       client ? " [--duration S] [--rate-limit rate|window] [--window N] [--rate Mb/s]"
       " [--mpending 1..128] [--validate]" : "");

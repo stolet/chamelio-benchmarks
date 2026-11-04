@@ -1,5 +1,5 @@
 /* Usage:
- *   ./udp_linux_server <bind_ip> <port> [--msize N] [--ncores N] [--buf-size N]
+ *   ./udp_linux_server <bind_ip> <port> [--msize N] [--rsize N] [--ncores N] [--buf-size N]
  *
  * Example:
  *   ./udp_linux_server 0.0.0.0 9000 --msize 64 --ncores 2 --buf-size 4096
@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <arpa/inet.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -49,6 +50,8 @@ static struct op_iters_config iters_config;
 
 /* Default arg values */
 size_t msize = 64;
+size_t rsize = 0;
+size_t slot_size;
 size_t bsize = 4096;
 int ncores = 1;
 
@@ -71,7 +74,7 @@ static inline int parse_args(int argc, char **argv)
   if (argc < 3)
   {
     fprintf(stderr, "Usage: %s <bind_ip> <port>" 
-        " [--msize N] [--ncores N] [--buf-size N]"
+        " [--msize N] [--rsize N] [--ncores N] [--buf-size N]"
         " [--op-iters N] [--op-iters-avx 256|512]\n", argv[0]);
     return -1;
   }
@@ -96,6 +99,18 @@ static inline int parse_args(int argc, char **argv)
     {
       msize = (size_t)strtoul(argv[++i], NULL, 10);
     }
+    else if (strcmp(argv[i], "--rsize") == 0 && i + 1 < argc)
+    {
+      char *end;
+      const char *text = argv[++i];
+      unsigned long value = strtoul(text, &end, 10);
+      if (*text == '-' || *end != '\0' || value < 32 || value > INT_MAX)
+      {
+        fprintf(stderr, "rsize must be between 32 and INT_MAX bytes\n");
+        return -1;
+      }
+      rsize = value;
+    }
     else if (strcmp(argv[i], "--ncores") == 0 && i + 1 < argc)
     {
       ncores = (size_t)strtoul(argv[++i], NULL, 10);
@@ -110,6 +125,22 @@ static inline int parse_args(int argc, char **argv)
       return -1;
     }
   }
+
+  if (rsize == 0)
+    rsize = msize;
+  if (msize < 32 || rsize < 32 || rsize > INT_MAX ||
+      msize > INT_MAX || bsize < msize || bsize > INT_MAX)
+  {
+    fprintf(stderr, "require 32 <= msize <= buf-size <= INT_MAX and 32 <= rsize <= INT_MAX\n");
+    return -1;
+  }
+  if (bsize < rsize)
+  {
+    fprintf(stderr, "buf-size must hold a complete response\n");
+    return -1;
+  }
+
+  slot_size = msize > rsize ? msize : rsize;
 
   return op_iters_validate(&iters_config);
 }
@@ -181,7 +212,7 @@ static inline __u32 core_epoll_events(struct core *c)
 {
   __u32 events = EPOLLERR | EPOLLHUP;
 
-  if (c->nrx + (int) msize <= (int) bsize)
+  if (c->nrx + (int) slot_size <= (int) bsize)
     events |= EPOLLIN;
   if (c->ntx < c->nrx)
     events |= EPOLLOUT;
@@ -286,7 +317,7 @@ static inline void core_rx(struct core *c)
 {
   int nrx;
   
-  while (c->nrx + (int) msize <= (int) bsize)
+  while (c->nrx + (int) slot_size <= (int) bsize)
   {
     assert(msize <= (size_t) ((int) bsize - c->nrx));
     nrx = recvfrom(c->fd, c->buf + c->nrx, msize, 0,
@@ -299,7 +330,7 @@ static inline void core_rx(struct core *c)
     if (iters_config.iterations > 0)
       op_iters_run(&iters_config, &c->iters_state);
 
-    c->nrx += nrx;
+    c->nrx += slot_size;
     __sync_fetch_and_add(&c->rxp_interval, 1);
     __sync_fetch_and_add(&c->rxb_interval, msize);
   }
@@ -313,17 +344,17 @@ static inline void core_tx(struct core *c)
   
   while (c->ntx < c->nrx)
   {
-    assert(msize <= c->nrx - c->ntx);
-    ntx = sendto(c->fd, c->buf + c->ntx, msize, 0,
+    assert(slot_size <= c->nrx - c->ntx);
+    ntx = sendto(c->fd, c->buf + c->ntx, rsize, 0,
         (struct sockaddr *) &c->dst_addr, c->dst_len);
-    assert(ntx == msize || ntx < 0);
+    assert(ntx == rsize || ntx < 0);
           
     if (ntx <= 0)
       break;
       
-    c->ntx += ntx;
+    c->ntx += slot_size;
     __sync_fetch_and_add(&c->txp_interval, 1);
-    __sync_fetch_and_add(&c->txb_interval, msize);
+    __sync_fetch_and_add(&c->txb_interval, rsize);
   }
   
   if (c->ntx == c->nrx)
