@@ -355,7 +355,7 @@ static inline void conn_rx(struct core *c, struct conn *con)
   {
     assert(con->rx_remain != 0);
     rx_len = con->rx_remain;
-    if (iters_config.iterations > 0 && rx_len > (int) bsize - con->nrx)
+    if (rx_len > (int) bsize - con->nrx)
       rx_len = (int) bsize - con->nrx;
     nrx = read(con->fd, con->buf + con->nrx, rx_len);
     assert(nrx <= 0 || (nrx <= msize && nrx <= con->rx_remain));
