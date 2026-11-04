@@ -7,6 +7,8 @@
  *   --reuse-port (default): cycle ports over workers; ports <= cores.
  *   --no-reuse-port: exactly one distinct port per worker.
  *   --msize Size of expected message
+ *   --tcp-rxbuf Socket receive buffer size in bytes (default: OS setting)
+ *   --tcp-txbuf Socket send buffer size in bytes (default: OS setting)
  *   --ncores Number of cores to use
  *   --op-iters N arithmetic iterations per request (default: 0)
  *   --op-iters-avx WIDTH Use 256-bit AVX2 or 512-bit AVX-512F arithmetic
@@ -68,6 +70,8 @@ static struct op_iters_config iters_config;
 size_t msize = 64;
 size_t bsize = 4096;
 int ncores = 1;
+int tcp_rxbuf = 0;
+int tcp_txbuf = 0;
 int mconns = 1;
 
 __u64 rxb_interval_total, rxp_interval_total;
@@ -93,6 +97,7 @@ static inline int parse_args(int argc, char **argv)
   {
     fprintf(stderr, "Usage: %s <bind_ip> <ports>" 
         " [--msize N] [--ncores N] [--buf-size N]"
+        " [--tcp-rxbuf B] [--tcp-txbuf B]"
         " [--reuse-port | --no-reuse-port]"
         " [--op-iters N] [--op-iters-avx 256|512]\n", argv[0]);
     return -1;
@@ -127,6 +132,25 @@ static inline int parse_args(int argc, char **argv)
     else if (strcmp(argv[i], "--msize") == 0 && i + 1 < argc)
     {
       msize = (size_t)strtoul(argv[++i], NULL, 10);
+    }
+    else if ((strcmp(argv[i], "--tcp-rxbuf") == 0 ||
+        strcmp(argv[i], "--tcp-txbuf") == 0) && i + 1 < argc)
+    {
+      const char *option = argv[i];
+      char *end;
+      long value;
+
+      errno = 0;
+      value = strtol(argv[++i], &end, 10);
+      if (errno != 0 || *end != '\0' || value <= 0 || value > INT_MAX)
+      {
+        fprintf(stderr, "%s must be between 1 and INT_MAX bytes\n", option);
+        return -1;
+      }
+      if (strcmp(option, "--tcp-rxbuf") == 0)
+        tcp_rxbuf = value;
+      else
+        tcp_txbuf = value;
     }
     else if (strcmp(argv[i], "--ncores") == 0 && i + 1 < argc)
     {
@@ -257,6 +281,20 @@ static inline void core_init(struct core *c)
     abort();
   }
   
+  /* Accepted sockets inherit these buffer sizes from the listener. */
+  if (tcp_rxbuf > 0 && setsockopt(c->listen_fd, SOL_SOCKET, SO_RCVBUF,
+      &tcp_rxbuf, sizeof(tcp_rxbuf)) < 0)
+  {
+    perror("setsockopt SO_RCVBUF");
+    exit(EXIT_FAILURE);
+  }
+  if (tcp_txbuf > 0 && setsockopt(c->listen_fd, SOL_SOCKET, SO_SNDBUF,
+      &tcp_txbuf, sizeof(tcp_txbuf)) < 0)
+  {
+    perror("setsockopt SO_SNDBUF");
+    exit(EXIT_FAILURE);
+  }
+
   if (reuse_port)
   {
     ret = setsockopt(c->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));

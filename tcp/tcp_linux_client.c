@@ -8,6 +8,8 @@
  *   --msize Total TCP payload bytes.
  *   --duration Duration in seconds to run benchmark
  *   --rate Per-core send rate in megabits per second
+ *   --tcp-rxbuf Socket receive buffer size in bytes (default: OS setting)
+ *   --tcp-txbuf Socket send buffer size in bytes (default: OS setting)
  *   --ncores Number of cores to use
  */
 
@@ -81,6 +83,8 @@ double rate = 10.0;
 int window_mode = 0;
 unsigned int window = 0;
 int ncores = 1;
+int tcp_rxbuf = 0;
+int tcp_txbuf = 0;
 int nconns = 1;
 int mpending = 0;
 int cwait = 0;
@@ -114,7 +118,8 @@ static inline int parse_args(int argc, char **argv)
     fprintf(stderr,
         "Usage: %s <src_ip> <src_port> <rem_ip> <rem_ports> [--msize N]"
         " [--duration S] [--rate-limit rate|window] [--rate R | --window N] [--ncores N]"
-        " [--nconns N] [--mpending N] [--cwait S]\n",
+        " [--nconns N] [--mpending N] [--cwait S]"
+        " [--tcp-rxbuf B] [--tcp-txbuf B]\n",
         argv[0]);
     return -1;
   }
@@ -174,6 +179,25 @@ static inline int parse_args(int argc, char **argv)
     {
       rate_given = 1;
       rate = strtod(argv[++i], NULL);
+    }
+    else if ((strcmp(argv[i], "--tcp-rxbuf") == 0 ||
+        strcmp(argv[i], "--tcp-txbuf") == 0) && i + 1 < argc)
+    {
+      const char *option = argv[i];
+      char *end;
+      long value;
+
+      errno = 0;
+      value = strtol(argv[++i], &end, 10);
+      if (errno != 0 || *end != '\0' || value <= 0 || value > INT_MAX)
+      {
+        fprintf(stderr, "%s must be between 1 and INT_MAX bytes\n", option);
+        return -1;
+      }
+      if (strcmp(option, "--tcp-rxbuf") == 0)
+        tcp_rxbuf = value;
+      else
+        tcp_txbuf = value;
     }
     else if ((strcmp(argv[i], "--ncores") == 0) && i + 1 < argc)
     {
@@ -352,6 +376,19 @@ static inline void core_init(struct core *c)
       perror("socket");
       exit(EXIT_FAILURE);
     }
+    if (tcp_rxbuf > 0 && setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
+        &tcp_rxbuf, sizeof(tcp_rxbuf)) < 0)
+    {
+      perror("setsockopt SO_RCVBUF");
+      exit(EXIT_FAILURE);
+    }
+    if (tcp_txbuf > 0 && setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
+        &tcp_txbuf, sizeof(tcp_txbuf)) < 0)
+    {
+      perror("setsockopt SO_SNDBUF");
+      exit(EXIT_FAILURE);
+    }
+
     set_nonblock(fd);
   
     con = &conns[i];
