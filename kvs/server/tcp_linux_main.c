@@ -19,6 +19,22 @@
 #include "iokvs.h"
 #include "sock.h"
 
+#ifdef ETRAN
+#undef EPOLLRDHUP
+#define EPOLLRDHUP 0
+#define epoll_create(size) epoll_create1(0)
+static ssize_t etran_io_result(ssize_t ret)
+{
+    if (ret == 0) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return ret;
+}
+#define send(fd, buf, len, flags) etran_io_result(write(fd, buf, len))
+#define recv(fd, buf, len, flags) etran_io_result(read(fd, buf, len))
+#endif
+
 #define MAX_EVENTS 128
 #define TCP_TX_BATCH 32
 
@@ -489,6 +505,10 @@ static void core_accept(struct core *c)
         }
 
         c->nconns++;
+#ifdef ETRAN
+        /* eTran accept blocks on an empty backlog, even with O_NONBLOCK. */
+        return;
+#endif
     }
 
     fprintf(stderr, "[%u] reached max connections\n", c->id);

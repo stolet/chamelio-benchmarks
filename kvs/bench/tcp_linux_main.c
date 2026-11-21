@@ -23,6 +23,22 @@
 #include "clock.h"
 #include "sock.h"
 
+#ifdef ETRAN
+#undef EPOLLRDHUP
+#define EPOLLRDHUP 0
+#define epoll_create(size) epoll_create1(0)
+static ssize_t etran_io_result(ssize_t ret)
+{
+    if (ret == 0) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return ret;
+}
+#define send(fd, buf, len, flags) etran_io_result(write(fd, buf, len))
+#define recv(fd, buf, len, flags) etran_io_result(read(fd, buf, len))
+#endif
+
 #define PRINT_STATS
 #ifdef PRINT_STATS
 #   define STATS_ADD(c, f, n) __atomic_fetch_add(&(c)->f, (n), __ATOMIC_RELAXED)
