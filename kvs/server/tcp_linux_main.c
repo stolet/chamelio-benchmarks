@@ -56,6 +56,7 @@ static struct core *cores;
 static struct item_allocator **iallocs;
 static volatile size_t n_ready = 0;
 
+#ifndef ETRAN
 static int set_reuseaddr(int fd)
 {
     int flag = 1;
@@ -69,6 +70,7 @@ static int set_tcp_nodelay(int fd)
 
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
+#endif
 
 static void conn_update_events(struct core *c, struct conn *con, uint8_t want_out)
 {
@@ -107,11 +109,13 @@ static int core_listen_socket(uint16_t id)
         close(fd);
         return -1;
     }
+#ifndef ETRAN
     if (set_reuseaddr(fd) != 0) {
         fprintf(stderr, "[%u] set_reuseaddr failed\n", id);
         close(fd);
         return -1;
     }
+#endif
     if (set_nonblock(fd) != 0) {
         fprintf(stderr, "[%u] set_nonblock failed\n", id);
         close(fd);
@@ -467,10 +471,12 @@ static void core_accept(struct core *c)
             perror("set_nonblock accepted fd failed");
             abort();
         }
+#ifndef ETRAN
         if (set_tcp_nodelay(fd) != 0) {
             perror("setsockopt TCP_NODELAY failed");
             abort();
         }
+#endif
 
         con = &c->conns[c->nconns];
         conn_init(con, fd, c->nconns);

@@ -118,12 +118,14 @@ static inline uint64_t read_cnt(uint64_t *p)
 }
 #endif
 
+#ifndef ETRAN
 static int set_tcp_nodelay(int fd)
 {
     int flag = 1;
 
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
+#endif
 
 static void conn_update_events(struct core *c, struct conn *con, uint8_t want_out)
 {
@@ -176,10 +178,12 @@ static void prepare_conn(struct core *c, struct conn *con, uint32_t id)
         perror("set_nonblock failed");
         abort();
     }
+#ifndef ETRAN
     if (set_tcp_nodelay(con->fd) != 0) {
         perror("setsockopt TCP_NODELAY failed");
         abort();
     }
+#endif
 
     if (settings.srcport != -1 &&
         (settings.srcip != INADDR_ANY || settings.srcport != 0)) {

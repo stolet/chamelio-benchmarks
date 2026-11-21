@@ -55,6 +55,22 @@ flexkvs_tcp_linux = executable(
 alias_target('kvs_udp_linux', [kvsbench_udp_linux, flexkvs_udp_linux])
 alias_target('kvs_tcp_linux', [kvsbench_tcp_linux, flexkvs_tcp_linux])
 
+kvsbench_tcp_etran = executable(
+  'kvsbench_tcp_etran',
+  kvs_bench_common + files('bench/tcp_linux_main.c') + clock_util_src + sock_util_src,
+  include_directories: [kvs_inc, utils_inc],
+  dependencies: kvs_deps,
+  c_args: ['-DETRAN', '-U_FILE_OFFSET_BITS'],
+)
+flexkvs_tcp_etran = executable(
+  'flexkvs_tcp_etran',
+  kvs_server_common + files('server/tcp_linux_main.c') + sock_util_src,
+  include_directories: [kvs_inc, utils_inc],
+  dependencies: kvs_deps,
+  c_args: ['-DETRAN', '-U_FILE_OFFSET_BITS'],
+)
+alias_target('kvs_tcp_etran', [kvsbench_tcp_etran, flexkvs_tcp_etran])
+
 if cham_enabled
   kvsbench_udp_cham = executable(
     'kvsbench_udp_cham',
