@@ -38,6 +38,10 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
 
   memset(config, 0, sizeof(*config));
   config->duration = 30;
+  config->burst_dur_mean = 1.0;
+  config->burst_dur_std = 1000.0;
+  config->burst_per_mean = 1000.0;
+  config->burst_per_std = 1000.0;
   config->core = -1;
   config->ncores = 1;
 
@@ -56,8 +60,33 @@ int homa_etran_parse(struct homa_etran_config *config, int argc, char **argv,
       continue;
     }
 
+    if (client && strcmp(argv[i], "--burst") == 0)
+    {
+      config->burst = 1;
+      continue;
+    }
+
     if (i + 1 == argc)
       goto failed;
+
+    double *burst_value = NULL;
+    if (client && strcmp(argv[i], "--burst-dur-mean") == 0)
+      burst_value = &config->burst_dur_mean;
+    else if (client && strcmp(argv[i], "--burst-dur-std") == 0)
+      burst_value = &config->burst_dur_std;
+    else if (client && strcmp(argv[i], "--burst-per-mean") == 0)
+      burst_value = &config->burst_per_mean;
+    else if (client && strcmp(argv[i], "--burst-per-std") == 0)
+      burst_value = &config->burst_per_std;
+    if (burst_value != NULL)
+    {
+      char *end;
+      double value = strtod(argv[++i], &end);
+      if (*argv[i] == '\0' || *end != '\0' || !isfinite(value) || value < 0.0)
+        goto failed;
+      *burst_value = value;
+      continue;
+    }
 
     if (strcmp(argv[i], "--cores") == 0)
     {
@@ -177,7 +206,9 @@ failed:
       " [--msize B[,B...]] [--rsize B[,B...]] [--ncores N] [--cores CPU,...]%s\n", argv[0],
       client ? " <rem_ip> <rem_port>" : "",
       client ? " [--duration S] [--rate-limit rate|window] [--window N] [--rate Mb/s[,Mb/s...]]"
-      " [--mpending N[,N...]] [--validate]" : "");
+      " [--mpending N[,N...]] [--validate]"
+      " [--burst] [--burst-dur-mean US] [--burst-dur-std US]"
+      " [--burst-per-mean US] [--burst-per-std US]" : "");
   return -1;
 }
 

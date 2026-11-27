@@ -36,6 +36,11 @@ struct homa_etran_config
   int validate;
   /* Send whenever an outstanding RPC slot is available. */
   int window_mode;
+  int burst;
+  double burst_dur_mean;
+  double burst_dur_std;
+  double burst_per_mean;
+  double burst_per_std;
   /* Number of workers */
   unsigned int ncores;
   /* Optional worker CPUs; -1 inherits process affinity. */

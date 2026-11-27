@@ -7,6 +7,7 @@
 #include "homa_etran.h"
 #include "homa_workers.h"
 #include "../utils/clock.h"
+#include "../utils/burst.h"
 #include "../utils/hist.h"
 
 #define NS_PER_SECOND 1000000000ULL
@@ -55,6 +56,7 @@ struct client
   __u64 next_report_ns;
   __u64 last_update_ns;
   double tokens;
+  struct burst_state burst;
 };
 
 /* Main owns reporting; each worker updates its histogram. */
@@ -201,13 +203,37 @@ static void start_measurement(struct client *client, __u64 now)
   client->next_report_ns = now + NS_PER_SECOND;
   client->last_update_ns = now;
   client->tokens = 0.0;
+  if (client->config.burst)
+  {
+    __u64 tsc = util_rdtsc();
+    client->burst.seed = (unsigned int) (tsc ^ client->fd);
+    burst_start(&client->burst, tsc, client->config.burst_dur_mean,
+        client->config.burst_dur_std);
+  }
 }
 
 static void update_tokens(struct client *client, __u64 now)
 {
   double bytes_per_us = CLIENT_RATE(client) / 8.0;
   double delta_us = (double) (now - client->last_update_ns) / 1000.0;
-  double max_tokens = bytes_per_us * TOKEN_BURST_US;
+  double max_tokens = bytes_per_us * (client->config.burst ?
+      client->config.burst_dur_mean : TOKEN_BURST_US);
+
+  if (client->config.burst)
+  {
+    __u64 tsc = util_rdtsc();
+    int was_on = client->burst.on;
+    if (burst_expired(&client->burst, tsc))
+      burst_toggle(&client->burst, tsc, client->config.burst_dur_mean,
+          client->config.burst_dur_std, client->config.burst_per_mean,
+          client->config.burst_per_std);
+    if (!was_on || !client->burst.on)
+    {
+      client->tokens = 0.0;
+      client->last_update_ns = now;
+      return;
+    }
+  }
 
   if (max_tokens < CLIENT_MSIZE(client))
     max_tokens = CLIENT_MSIZE(client);
@@ -221,6 +247,9 @@ static int is_send_allowed(struct client *client, __u64 now)
 {
   if (client->start_ns == 0)
     return client->sent == 0;
+
+  if (client->config.burst && !client->burst.on)
+    return 0;
 
   return now < client->end_ns &&
       client->active < CLIENT_MPENDING(client) &&

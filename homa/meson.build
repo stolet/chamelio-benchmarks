@@ -12,7 +12,7 @@ if cham_homa_dep.found()
     homa_common,
     '../utils/clock.c',
     '../utils/hist.c',
-    dependencies: [cham_homa_dep, threads_dep],
+    dependencies: [cham_homa_dep, threads_dep, math_dep],
   )
   alias_target('homa_cham', [homa_cham_client, homa_cham_server])
 endif
@@ -36,7 +36,7 @@ if fs.is_file(homa_module_dir / 'homa.h')
     '../utils/clock.c',
     '../utils/hist.c',
     include_directories: include_directories(homa_module_dir),
-    dependencies: threads_dep,
+    dependencies: [threads_dep, math_dep],
   )
   alias_target('homa_linux', [homa_linux_client, homa_linux_server])
 endif
@@ -65,7 +65,7 @@ if fs.is_file(etran_dir / 'eTran/lib/include/eTran_rpc.h') and fs.is_file(
     'homa_etran_client', 'homa_etran_client.c', homa_etran_common,
     '../utils/clock.c', '../utils/hist.c',
     include_directories: etran_inc,
-    dependencies: etran_deps,
+    dependencies: etran_deps + [math_dep],
     override_options: ['cpp_std=gnu++17'],
   )
   homa_etran_server = executable(
